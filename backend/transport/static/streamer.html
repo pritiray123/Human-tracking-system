@@ -56,15 +56,25 @@
       border-radius: 8px; color: var(--text); font-size: 0.88rem; padding: 10px 12px; outline: none;
     }
     #device-name:focus { border-color: var(--accent); }
-    .controls { display: flex; gap: 10px; padding-top: 12px; flex-wrap: wrap; }
+    .controls { display: flex; gap: 8px; padding-top: 12px; width: 100%; }
     button {
-      flex: 1; min-width: 100px; padding: 13px 16px; border: none;
-      border-radius: 10px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+      flex: 1; padding: 13px 12px; border: none;
+      border-radius: 10px; font-size: 0.88rem; font-weight: 600; cursor: pointer;
     }
     button:disabled { opacity: 0.4; cursor: default; }
-    #btn-start { background: var(--accent); color: #000; }
-    #btn-disconnect { background: var(--danger); color: white; display: none; }
-    #btn-flip { background: var(--border); color: var(--text); flex: 0 0 auto; }
+    #btn-start { background: var(--accent); color: #000; display: block; flex: 1; }
+    #btn-disconnect { background: var(--danger); color: white; display: block; flex: 1; }
+    #btn-flip { background: var(--border); color: var(--text); flex: 0 0 auto; min-width: 80px; }
+    #https-notice {
+      display: none; background: #2a1a00; border: 1px solid #ffaa00;
+      border-radius: 10px; padding: 12px; margin-top: 12px; text-align: center;
+    }
+    #https-notice p { font-size: 0.78rem; color: #ffddaa; margin-bottom: 8px; line-height: 1.4; }
+    #https-notice a {
+      display: inline-block; background: #ffaa00; color: #000;
+      font-size: 0.82rem; font-weight: 700; text-decoration: none;
+      padding: 8px 14px; border-radius: 6px; margin-top: 4px;
+    }
     #stats { font-size: 0.72rem; color: var(--text-dim); padding-top: 10px; }
     .info { font-size: 0.72rem; color: var(--text-dim); text-align: center; }
   </style>
@@ -92,6 +102,11 @@
     <span id="status-text">Tap Start Streaming to begin camera access.</span>
   </div>
 
+  <div id="https-notice">
+    <p>🔒 <strong>HTTPS Context Required</strong><br />Mobile browsers block camera access on plain HTTP IP addresses.</p>
+    <a id="https-link" href="#">Open Secure HTTPS Streamer Link</a>
+  </div>
+
   <p class="field-label">Device name (shown on dashboard)</p>
   <input id="device-name" type="text" maxlength="40" placeholder="e.g. iPhone, Mobile Cam 1" />
 
@@ -108,24 +123,6 @@
 
 <script>
 "use strict";
-
-function getDeviceId() {
-  let id = localStorage.getItem("hts_device_id");
-  if (!id) {
-    id = typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : "dev-" + Math.random().toString(36).substr(2, 9);
-    localStorage.setItem("hts_device_id", id);
-  }
-  return id;
-}
-const deviceId = getDeviceId();
-
-const urlParams = new URLSearchParams(window.location.search);
-const sessionId = urlParams.get("session") || urlParams.get("sessionId") || "default";
-
-const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-const WS_URL = `${wsProtocol}//${window.location.host}/ws/signaling`;
 
 let ws = null;
 let stream = null;
@@ -152,13 +149,31 @@ let reconnectAttempts = 0;
 let sysInfo = {
   default_width: 640,
   default_height: 480,
-  default_fps: 30,
+  default_fps: 24,
   jpeg_quality: 60,
   ice_servers: [
     { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
     { urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"], username: "openrelayproject", credential: "openrelayproject" }
   ]
 };
+
+function getDeviceId() {
+  let id = localStorage.getItem("hts_device_id");
+  if (!id) {
+    id = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : "dev-" + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem("hts_device_id", id);
+  }
+  return id;
+}
+const deviceId = getDeviceId();
+
+const urlParams = new URLSearchParams(window.location.search);
+const sessionId = urlParams.get("session") || urlParams.get("sessionId") || "default";
+
+const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+const WS_URL = `${wsProtocol}//${window.location.host}/ws/signaling`;
 
 const video = document.getElementById("video");
 const canvas = document.createElement("canvas");
@@ -170,6 +185,8 @@ const sessionBadge = document.getElementById("session-badge");
 const placeholder = document.getElementById("placeholder");
 const btnStart = document.getElementById("btn-start");
 const btnDisconnect = document.getElementById("btn-disconnect");
+const httpsNotice = document.getElementById("https-notice");
+const httpsLink = document.getElementById("https-link");
 const statsEl = document.getElementById("stats");
 
 sessionBadge.textContent = "Session: " + sessionId;
@@ -179,11 +196,27 @@ function getDeviceName() {
   return (el && el.value && el.value.trim()) ? el.value.trim() : "Mobile Camera";
 }
 
+function setControlButtons(isStreaming) {
+  btnDisconnect.style.display = "block";
+  btnDisconnect.style.flex = "1";
+
+  if (isStreaming) {
+    btnStart.style.display = "none";
+  } else {
+    btnStart.style.display = "block";
+    btnStart.style.flex = "1";
+  }
+}
+
 function updateState(newState, text = "", dotClass = "") {
   state = newState;
   console.log(`[HTS Streamer State] -> ${state} (${text})`);
   statusText.textContent = text || state;
   statusDot.className = "";
+
+  const isStreamingState = (dotClass === "streaming" || state === "STREAMING" || state === "FALLBACK_STREAMING" || state === "SIGNALING" || state === "ICE_CONNECTING");
+  setControlButtons(isStreamingState);
+
   if (dotClass === "streaming" || state === "STREAMING" || state === "FALLBACK_STREAMING") {
     statusDot.classList.add("streaming");
   } else if (dotClass === "error" || state === "ERROR" || state === "STOPPED_BY_SERVER") {
@@ -198,9 +231,23 @@ async function loadSystemConfig() {
       const data = await res.json();
       sysInfo = { ...sysInfo, ...data };
       console.log("[HTS Streamer] Config loaded:", sysInfo);
+
+      if (!window.isSecureContext && sysInfo.public_streamer_url && window.location.protocol === "http:") {
+        const secureTarget = sysInfo.public_streamer_url + (window.location.search || "");
+        console.log("[HTS Streamer] Non-secure HTTP LAN context detected. Auto-redirecting to HTTPS:", secureTarget);
+        window.location.href = secureTarget;
+        return;
+      }
     }
   } catch (err) {
     console.warn("[HTS Streamer] Config load warning:", err);
+  }
+
+  if (!window.isSecureContext) {
+    httpsNotice.style.display = "block";
+    if (sysInfo.public_streamer_url) {
+      httpsLink.href = sysInfo.public_streamer_url + (window.location.search || "");
+    }
   }
 }
 loadSystemConfig();
@@ -255,7 +302,18 @@ async function openCamera() {
   stopMediaStream();
 
   if (!window.isSecureContext) {
-    updateState("ERROR", "Camera requires HTTPS context.", "error");
+    if (sysInfo.public_streamer_url && window.location.protocol === "http:") {
+      const secureTarget = sysInfo.public_streamer_url + (window.location.search || "");
+      console.log("[HTS Streamer] Redirecting non-secure LAN connection to HTTPS:", secureTarget);
+      window.location.href = secureTarget;
+      return false;
+    }
+
+    httpsNotice.style.display = "block";
+    if (sysInfo.public_streamer_url) {
+      httpsLink.href = sysInfo.public_streamer_url + (window.location.search || "");
+    }
+    updateState("ERROR", "Mobile camera requires HTTPS context.", "error");
     placeholder.classList.remove("hidden");
     return false;
   }
@@ -271,7 +329,7 @@ async function openCamera() {
         facingMode: { ideal: facingMode },
         width: { ideal: sysInfo.default_width || 640 },
         height: { ideal: sysInfo.default_height || 480 },
-        frameRate: { ideal: sysInfo.default_fps || 30, max: 30 }
+        frameRate: { ideal: sysInfo.default_fps || 24, max: 30 }
       },
       audio: false
     });
@@ -480,7 +538,7 @@ function connectWebSocket() {
       updateState("SIGNALING", "CONNECTED / SIGNALING READY", "streaming");
       liveBadge.classList.add("visible");
       btnStart.style.display = "none";
-      btnDisconnect.style.display = "";
+      btnDisconnect.style.display = "block";
       btnStart.disabled = false;
     } catch (openErr) {
       console.error("[WS] Error in onopen handler:", openErr);
@@ -499,8 +557,8 @@ function connectWebSocket() {
         stopMediaStream();
         updateState("STOPPED_BY_SERVER", "Disconnected by dashboard.", "error");
         liveBadge.classList.remove("visible");
-        btnStart.style.display = "";
-        btnDisconnect.style.display = "none";
+        btnStart.style.display = "block";
+        btnDisconnect.style.display = "block";
         btnStart.disabled = false;
         return;
       }
@@ -540,9 +598,9 @@ function connectWebSocket() {
       updateState("DISCONNECTED", `Signaling connection lost (${event.code}). Reconnecting…`, "error");
       scheduleReconnect();
     } else {
-      updateState("DISCONNECTED", "Disconnected.", "");
-      btnStart.style.display = "";
-      btnDisconnect.style.display = "none";
+      updateState("DISCONNECTED", "Stopped.", "");
+      btnStart.style.display = "block";
+      btnDisconnect.style.display = "block";
       btnStart.disabled = false;
     }
   };
@@ -580,8 +638,8 @@ function disconnectClient() {
   stopMediaStream();
   placeholder.classList.remove("hidden");
   liveBadge.classList.remove("visible");
-  btnStart.style.display = "";
-  btnDisconnect.style.display = "none";
+  btnStart.style.display = "block";
+  btnDisconnect.style.display = "block";
   btnStart.disabled = false;
   updateState("IDLE", "Disconnected by client. Tap Start Streaming to reconnect.");
   statsEl.textContent = "";
@@ -608,7 +666,7 @@ async function flipCamera() {
           facingMode: { exact: facingMode },
           width: { ideal: sysInfo.default_width || 640 },
           height: { ideal: sysInfo.default_height || 480 },
-          frameRate: { ideal: sysInfo.default_fps || 30 }
+          frameRate: { ideal: sysInfo.default_fps || 24 }
         },
         audio: false
       });

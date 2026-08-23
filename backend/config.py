@@ -43,17 +43,26 @@ HTTPS_ENABLED: bool = False
 
 raw_public = (os.environ.get("PUBLIC_URL") or os.environ.get("VITE_API_BASE_URL") or "").strip().rstrip("/")
 if raw_public:
-    if not (raw_public.startswith("http://") or raw_public.startswith("https://")):
-        raw_public = "https://" + raw_public
-PUBLIC_URL: str = raw_public
+    while raw_public.startswith("https://") or raw_public.startswith("http://"):
+        if raw_public.startswith("https://"):
+            raw_public = raw_public[8:]
+        elif raw_public.startswith("http://"):
+            raw_public = raw_public[7:]
+    PUBLIC_URL = "https://" + raw_public.strip().rstrip("/")
+else:
+    PUBLIC_URL = ""
 
 raw_signaling = (os.environ.get("SIGNALING_URL") or os.environ.get("VITE_WS_URL") or "").strip().rstrip("/")
 if raw_signaling:
-    SIGNALING_URL = raw_signaling
+    while raw_signaling.startswith("wss://") or raw_signaling.startswith("ws://"):
+        if raw_signaling.startswith("wss://"):
+            raw_signaling = raw_signaling[6:]
+        elif raw_signaling.startswith("ws://"):
+            raw_signaling = raw_signaling[5:]
+    SIGNALING_URL = "wss://" + raw_signaling.strip().rstrip("/")
 elif PUBLIC_URL:
     clean_host = PUBLIC_URL.replace("https://", "").replace("http://", "").rstrip("/")
-    proto = "wss:" if PUBLIC_URL.startswith("https:") else "ws:"
-    SIGNALING_URL = f"{proto}//{clean_host}/ws/signaling"
+    SIGNALING_URL = f"wss://{clean_host}/ws/signaling"
 else:
     SIGNALING_URL = ""
 
