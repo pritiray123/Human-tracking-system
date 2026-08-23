@@ -2,27 +2,23 @@ import { useState, useEffect, useRef } from 'react';
 import CameraFeed from './components/CameraFeed';
 import DevicePanel from './components/DevicePanel';
 import StatusBar from './components/StatusBar';
-import {
-  getWsSignalingUrl,
-  createSession,
-  getSystemInfo,
-  disconnectDevice as apiDisconnectDevice,
-  setActiveDevice as apiSetActiveDevice
-} from './services/api';
-import './App.css';
+import { getSystemInfo, setActiveDevice as apiSetActiveDevice, disconnectDevice as apiDisconnectDevice } from './services/api';
 
 export default function App() {
   const [devices, setDevices] = useState([]);
   const [activeDeviceId, setActiveDeviceId] = useState('');
-  const [sessionId, setSessionId] = useState('');
   const [remoteStream, setRemoteStream] = useState(null);
   const [webrtcStatus, setWebrtcStatus] = useState('DISCONNECTED');
-  const [webrtcStats, setWebrtcStats] = useState(null);
+  const [webrtcStats, setWebrtcStats] = useState({ framesDecoded: 0, framesDropped: 0, jitter: 0, bytesReceived: 0 });
+  const [sessionId, setSessionId] = useState('');
 
-  const wsRef = useRef(null);
   const pcRef = useRef(null);
+  const wsRef = useRef(null);
   const rtcIdRef = useRef('');
-  const iceServersRef = useRef([{ urls: 'stun:stun.l.google.com:19302' }]);
+  const iceServersRef = useRef([
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443'], username: 'openrelayproject', credential: 'openrelayproject' }
+  ]);
   const iceTimeoutTimerRef = useRef(null);
 
   useEffect(() => {
@@ -32,28 +28,23 @@ export default function App() {
     async function initSystem() {
       try {
         const info = await getSystemInfo();
-        if (info.ice_servers && info.ice_servers.length > 0) {
+        if (!mounted) return;
+        setSessionId(info.session_id || '');
+        if (info.ice_servers && Array.isArray(info.ice_servers)) {
           iceServersRef.current = info.ice_servers;
         }
-
-        const sess = await createSession();
-        if (!mounted) return;
-        const currentSession = sess.session_id || 'default';
-        setSessionId(currentSession);
-
-        connectSignaling(currentSession);
-      } catch (err) {
-        console.warn('[HTS Dashboard] System initialization warning:', err);
+        connectSignalingWS(info.session_id);
+      } catch (e) {
+        console.error('[HTS Dashboard] System info init error:', e);
       }
     }
 
-    function connectSignaling(currentSession) {
-      if (wsRef.current && (wsRef.current.readyState === WebSocket.CONNECTING || wsRef.current.readyState === WebSocket.OPEN)) {
-        return;
-      }
+    function connectSignalingWS(currentSession) {
+      if (!currentSession) return;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/signaling`;
 
-      const wsUrl = getWsSignalingUrl();
-      console.log('[HTS Dashboard] Connecting to signaling WebSocket:', wsUrl);
+      console.log('[HTS Dashboard] Connecting WebSocket signaling:', wsUrl);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -136,12 +127,17 @@ export default function App() {
       }, 5000);
 
       try {
-        console.log(`[HTS RTC ${rtcId}] Creating RTCPeerConnection as OFFERER with ICE servers:`, iceServersRef.current);
-        const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
+        console.log(`[HTS RTC ${rtcId}] Creating UDP RTCPeerConnection as OFFERER with ICE servers:`, iceServersRef.current);
+        const pc = new RTCPeerConnection({
+          iceServers: iceServersRef.current,
+          iceCandidatePoolSize: 10,
+          bundlePolicy: 'max-bundle',
+          rtcpMuxPolicy: 'require'
+        });
         pcRef.current = pc;
 
         pc.ontrack = (event) => {
-          console.log(`[HTS RTC ${rtcId}] Remote MediaStream track received:`, event.streams);
+          console.log(`[HTS RTC ${rtcId}] Remote UDP MediaStream track received:`, event.streams);
           if (event.streams && event.streams[0]) {
             setRemoteStream(event.streams[0]);
           }
@@ -149,7 +145,7 @@ export default function App() {
 
         pc.onicecandidate = (event) => {
           if (event.candidate && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            console.log(`[HTS RTC ${rtcId}] Sending ICE candidate type:`, event.candidate.type || 'unknown');
+            console.log(`[HTS RTC ${rtcId}] Sending UDP ICE candidate type:`, event.candidate.type || 'unknown');
             wsRef.current.send(JSON.stringify({
               type: 'candidate',
               candidate: event.candidate,
@@ -160,16 +156,16 @@ export default function App() {
         };
 
         pc.oniceconnectionstatechange = () => {
-          console.log(`[HTS RTC ${rtcId}] ICE connection state changed to: ${pc.iceConnectionState}`);
+          console.log(`[HTS RTC ${rtcId}] UDP ICE connection state changed to: ${pc.iceConnectionState}`);
           if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
             if (iceTimeoutTimerRef.current) {
               clearTimeout(iceTimeoutTimerRef.current);
               iceTimeoutTimerRef.current = null;
             }
-            console.log(`[HTS RTC ${rtcId}] WebRTC ICE P2P Connection established!`);
-            setWebrtcStatus('STREAMING (P2P)');
+            console.log(`[HTS RTC ${rtcId}] WebRTC UDP P2P Connection established!`);
+            setWebrtcStatus('STREAMING (P2P UDP)');
           } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-            console.warn(`[HTS RTC ${rtcId}] WebRTC ICE failed/disconnected. Transitioning to FALLBACK STREAMING.`);
+            console.warn(`[HTS RTC ${rtcId}] WebRTC UDP ICE failed/disconnected. Transitioning to FALLBACK STREAMING.`);
             closePeerConnection('ICE failed');
             setRemoteStream(null);
             setWebrtcStatus('FALLBACK STREAMING');
@@ -190,7 +186,7 @@ export default function App() {
           }));
         }
       } catch (err) {
-        console.error(`[HTS RTC ${rtcIdRef.current}] Error creating WebRTC offer:`, err);
+        console.error(`[HTS RTC ${rtcIdRef.current}] Error creating WebRTC UDP offer:`, err);
         closePeerConnection('offer error');
         setRemoteStream(null);
         setWebrtcStatus('FALLBACK STREAMING');

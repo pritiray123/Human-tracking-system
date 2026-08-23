@@ -132,7 +132,7 @@ let rtcId = null;
 let state = "IDLE";
 let manuallyStopped = false;
 let reconnecting = false;
-let fallbackActive = false;
+let isSendingFrames = false;
 let isProcessingFrame = false;
 let clockOffset = 0.0;
 let lastSent = 0;
@@ -150,7 +150,7 @@ let sysInfo = {
   default_width: 640,
   default_height: 480,
   default_fps: 24,
-  jpeg_quality: 60,
+  jpeg_quality: 55,
   ice_servers: [
     { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
     { urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"], username: "openrelayproject", credential: "openrelayproject" }
@@ -264,6 +264,8 @@ function stopMediaStream() {
 
 function cleanupConnection() {
   console.log("[HTS Streamer] Executing connection resource cleanup");
+  isSendingFrames = false;
+  isProcessingFrame = false;
   if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (iceTimeoutTimer) { clearTimeout(iceTimeoutTimer); iceTimeoutTimer = null; }
@@ -366,10 +368,15 @@ async function initPeerConnection() {
 
   rtcId = Math.random().toString(36).substring(2, 8);
   const iceServers = sysInfo.ice_servers || [{ urls: "stun:stun.l.google.com:19302" }];
-  console.log(`[HTS RTC ${rtcId}] Initializing RTCPeerConnection (ANSWERER) with ICE servers:`, iceServers);
+  console.log(`[HTS RTC ${rtcId}] Initializing RTCPeerConnection UDP ANSWERER with ICE servers:`, iceServers);
 
   try {
-    peerConnection = new RTCPeerConnection({ iceServers });
+    peerConnection = new RTCPeerConnection({
+      iceServers,
+      iceCandidatePoolSize: 10,
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require"
+    });
 
     stream.getTracks().forEach(track => {
       peerConnection.addTrack(track, stream);
@@ -400,15 +407,14 @@ async function initPeerConnection() {
 
     peerConnection.oniceconnectionstatechange = () => {
       if (!peerConnection) return;
-      console.log(`[HTS RTC ${rtcId}] ICE connection state: ${peerConnection.iceConnectionState}`);
+      console.log(`[HTS RTC ${rtcId}] UDP ICE connection state: ${peerConnection.iceConnectionState}`);
 
       if (peerConnection.iceConnectionState === "connected" || peerConnection.iceConnectionState === "completed") {
         if (iceTimeoutTimer) { clearTimeout(iceTimeoutTimer); iceTimeoutTimer = null; }
-        fallbackActive = false;
-        updateState("STREAMING", "WebRTC P2P CONNECTED / LIVE", "streaming");
+        updateState("STREAMING", "WebRTC UDP P2P CONNECTED / LIVE", "streaming");
       } else if (peerConnection.iceConnectionState === "failed" || peerConnection.iceConnectionState === "disconnected") {
-        console.warn(`[HTS RTC ${rtcId}] WebRTC ICE failed/disconnected. Enabling Fallback JPEG Stream.`);
-        activateFallbackStream();
+        console.warn(`[HTS RTC ${rtcId}] WebRTC UDP ICE failed/disconnected. Continuing active WebSocket stream.`);
+        updateState("FALLBACK_STREAMING", "FALLBACK STREAMING (JPEG/WS)", "streaming");
       }
     };
 
@@ -419,31 +425,16 @@ async function initPeerConnection() {
   }
 }
 
-function activateFallbackStream() {
-  if (fallbackActive) return;
-  console.log("[HTS Streamer] Activating Fallback JPEG/WebSocket Stream");
-  fallbackActive = true;
-  if (iceTimeoutTimer) { clearTimeout(iceTimeoutTimer); iceTimeoutTimer = null; }
-
-  if (peerConnection) {
-    try { peerConnection.close(); } catch {}
-    peerConnection = null;
-  }
-
-  updateState("FALLBACK_STREAMING", "FALLBACK STREAMING (JPEG/WS)", "streaming");
-  requestAnimationFrame(sendFrame);
-}
-
 async function handleOfferAndSendAnswer(sdpOffer) {
-  updateState("ICE_CONNECTING", "Establishing WebRTC P2P connection…");
+  updateState("ICE_CONNECTING", "Establishing WebRTC UDP P2P connection…");
 
   if (iceTimeoutTimer) clearTimeout(iceTimeoutTimer);
   iceTimeoutTimer = setTimeout(() => {
     if (state === "ICE_CONNECTING" || (peerConnection && peerConnection.iceConnectionState !== "connected")) {
-      console.warn("[HTS WebRTC] ICE connection timeout (8s). Falling back to JPEG/WS transport.");
-      activateFallbackStream();
+      console.warn("[HTS WebRTC] UDP ICE connection timeout (6s). Continuing active WebSocket stream.");
+      updateState("FALLBACK_STREAMING", "FALLBACK STREAMING (JPEG/WS)", "streaming");
     }
-  }, 8000);
+  }, 6000);
 
   const pc = await initPeerConnection();
   if (!pc) return;
@@ -464,13 +455,12 @@ async function handleOfferAndSendAnswer(sdpOffer) {
     }
   } catch (err) {
     console.error(`[HTS RTC ${rtcId}] Error creating/sending SDP answer:`, err);
-    activateFallbackStream();
+    updateState("FALLBACK_STREAMING", "FALLBACK STREAMING (JPEG/WS)", "streaming");
   }
 }
 
 async function startStreaming() {
   manuallyStopped = false;
-  fallbackActive = false;
   reconnectAttempts = 0;
   btnStart.disabled = true;
 
@@ -535,11 +525,13 @@ function connectWebSocket() {
         role: "streamer"
       }));
 
-      updateState("SIGNALING", "CONNECTED / SIGNALING READY", "streaming");
+      updateState("STREAMING", "CONNECTED / STREAMING LIVE", "streaming");
       liveBadge.classList.add("visible");
-      btnStart.style.display = "none";
-      btnDisconnect.style.display = "block";
       btnStart.disabled = false;
+
+      isSendingFrames = true;
+      isProcessingFrame = false;
+      requestAnimationFrame(sendFrame);
     } catch (openErr) {
       console.error("[WS] Error in onopen handler:", openErr);
       updateState("ERROR", "Signaling setup error: " + openErr.message, "error");
@@ -557,8 +549,6 @@ function connectWebSocket() {
         stopMediaStream();
         updateState("STOPPED_BY_SERVER", "Disconnected by dashboard.", "error");
         liveBadge.classList.remove("visible");
-        btnStart.style.display = "block";
-        btnDisconnect.style.display = "block";
         btnStart.disabled = false;
         return;
       }
@@ -599,8 +589,6 @@ function connectWebSocket() {
       scheduleReconnect();
     } else {
       updateState("DISCONNECTED", "Stopped.", "");
-      btnStart.style.display = "block";
-      btnDisconnect.style.display = "block";
       btnStart.disabled = false;
     }
   };
@@ -638,8 +626,6 @@ function disconnectClient() {
   stopMediaStream();
   placeholder.classList.remove("hidden");
   liveBadge.classList.remove("visible");
-  btnStart.style.display = "block";
-  btnDisconnect.style.display = "block";
   btnStart.disabled = false;
   updateState("IDLE", "Disconnected by client. Tap Start Streaming to reconnect.");
   statsEl.textContent = "";
@@ -722,14 +708,19 @@ async function flipCamera() {
 }
 
 function sendFrame(timestamp) {
-  if (manuallyStopped || !fallbackActive) return;
+  if (manuallyStopped || !isSendingFrames) return;
+
+  if (isProcessingFrame) {
+    requestAnimationFrame(sendFrame);
+    return;
+  }
 
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     requestAnimationFrame(sendFrame);
     return;
   }
 
-  if (ws.bufferedAmount > 128 * 1024) {
+  if (ws.bufferedAmount > 64 * 1024) {
     requestAnimationFrame(sendFrame);
     return;
   }
@@ -763,7 +754,7 @@ function sendFrame(timestamp) {
     async blob => {
       try {
         if (!blob || manuallyStopped || !ws || ws.readyState !== WebSocket.OPEN) return;
-        if (ws.bufferedAmount > 128 * 1024) return;
+        if (ws.bufferedAmount > 64 * 1024) return;
 
         const serverAdjustedTs = (Date.now() / 1000.0) + clockOffset;
         const arrayBuf = await blob.arrayBuffer();
@@ -784,7 +775,7 @@ function sendFrame(timestamp) {
 
         const avgKb = (packet.byteLength / 1024).toFixed(1);
         statsEl.textContent =
-          `Fallback: ${framesSent} frames · ` +
+          `Live Stream: ${framesSent} frames · ` +
           `${avgKb} KB/frame · ` +
           `${width}x${height} · ` +
           `${fps} FPS`;
@@ -795,7 +786,7 @@ function sendFrame(timestamp) {
       }
     },
     "image/jpeg",
-    (sysInfo.jpeg_quality || 60) / 100
+    (sysInfo.jpeg_quality || 55) / 100
   );
 
   requestAnimationFrame(sendFrame);

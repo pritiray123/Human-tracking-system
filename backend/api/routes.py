@@ -210,7 +210,9 @@ def stream_active(
                         + jpeg_bytes
                         + b"\r\n"
                     )
-                time.sleep(0.02)
+                    time.sleep(0.005)
+                else:
+                    time.sleep(0.01)
                 continue
 
             ok, frame = active.read()
