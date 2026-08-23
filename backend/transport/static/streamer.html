@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>HTS — Remote Camera Streamer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f0f1a; --surface: #1a1a2e; --accent: #00c896;
+      --text: #e0e0e0; --text-dim: #888; --danger: #e05050; --border: #2a2a45;
+    }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100dvh; display: flex; flex-direction: column;
+      align-items: center; padding: 20px 16px 32px; gap: 16px;
+    }
+    header { width: 100%; max-width: 540px; }
+    header h1 { font-size: 1.1rem; color: var(--accent); font-weight: 700; }
+    header p { font-size: 0.75rem; color: var(--text-dim); }
+    .card {
+      width: 100%; max-width: 540px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+    }
+    #preview-wrap {
+      position: relative; width: 100%; aspect-ratio: 16 / 9;
+      background: #0a0a14; border-radius: 10px; overflow: hidden;
+    }
+    #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #placeholder {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; color: var(--text-dim);
+      font-size: 0.85rem; text-align: center; padding: 12px; gap: 6px;
+    }
+    #placeholder.hidden { display: none; }
+    #live-badge {
+      position: absolute; top: 10px; left: 10px; background: var(--danger);
+      color: white; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.1em;
+      padding: 4px 9px; border-radius: 4px; display: none;
+    }
+    #live-badge.visible { display: block; }
+    #session-badge {
+      position: absolute; top: 10px; right: 10px; background: #2a2a45;
+      color: var(--accent); font-size: 0.65rem; font-weight: 700;
+      padding: 4px 9px; border-radius: 4px; border: 1px solid var(--accent);
+    }
+    #status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; padding: 12px 0 4px; }
+    #status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
+    #status-dot.streaming { background: var(--accent); animation: pulse 1.2s infinite; }
+    #status-dot.error { background: var(--danger); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .field-label { font-size: 0.72rem; color: var(--text-dim); margin: 14px 0 5px; }
+    #device-name {
+      width: 100%; background: #0f0f1a; border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 0.88rem; padding: 10px 12px; outline: none;
+    }
+    #device-name:focus { border-color: var(--accent); }
+    .controls { display: flex; gap: 10px; padding-top: 12px; flex-wrap: wrap; }
+    button {
+      flex: 1; min-width: 100px; padding: 13px 16px; border: none;
+      border-radius: 10px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #btn-start { background: var(--accent); color: #000; }
+    #btn-disconnect { background: var(--danger); color: white; display: none; }
+    #btn-flip { background: var(--border); color: var(--text); flex: 0 0 auto; }
+    #stats { font-size: 0.72rem; color: var(--text-dim); padding-top: 10px; }
+    .info { font-size: 0.72rem; color: var(--text-dim); text-align: center; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>HTS Remote Camera</h1>
+  <p>Human Tracking System — Mobile Streamer Client</p>
+</header>
+
+<div class="card">
+  <div id="preview-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="placeholder">
+      <span>📷 Camera preview will appear here</span>
+      <span style="font-size:0.75rem; color:#666;">Tap Start Streaming to enable camera</span>
+    </div>
+    <div id="live-badge">● LIVE</div>
+    <div id="session-badge">Session: ---</div>
+  </div>
+
+  <div id="status-bar">
+    <div id="status-dot"></div>
+    <span id="status-text">Tap Start Streaming to begin camera access.</span>
+  </div>
+
+  <p class="field-label">Device name (shown on dashboard)</p>
+  <input id="device-name" type="text" maxlength="40" placeholder="e.g. iPhone, Mobile Cam 1" />
+
+  <div class="controls">
+    <button id="btn-start" onclick="startStreaming()">▶ Start Streaming</button>
+    <button id="btn-disconnect" onclick="disconnectClient()">🛑 Disconnect</button>
+    <button id="btn-flip" onclick="flipCamera()">🔄 Flip</button>
+  </div>
+
+  <div id="stats"></div>
+</div>
+
+<p class="info">Powered by Controlled State-Machine Transport</p>
+
+<script>
+"use strict";
+
+function getDeviceId() {
+  let id = localStorage.getItem("hts_device_id");
+  if (!id) {
+    id = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : "dev-" + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem("hts_device_id", id);
+  }
+  return id;
+}
+const deviceId = getDeviceId();
+
+const urlParams = new URLSearchParams(window.location.search);
+const sessionId = urlParams.get("session") || urlParams.get("sessionId") || "default";
+
+const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+const WS_URL = `${wsProtocol}//${window.location.host}/ws/signaling`;
+
+let ws = null;
+let stream = null;
+let peerConnection = null;
+let rtcId = null;
+
+let state = "IDLE";
+let manuallyStopped = false;
+let reconnecting = false;
+let fallbackActive = false;
+let isProcessingFrame = false;
+let clockOffset = 0.0;
+let lastSent = 0;
+let framesSent = 0;
+let bytesSent = 0;
+let facingMode = "environment";
+let currentVideoDeviceId = null;
+
+let pingTimer = null;
+let reconnectTimer = null;
+let iceTimeoutTimer = null;
+let reconnectAttempts = 0;
+
+let sysInfo = {
+  default_width: 640,
+  default_height: 480,
+  default_fps: 30,
+  jpeg_quality: 60,
+  ice_servers: [
+    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+    { urls: ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"], username: "openrelayproject", credential: "openrelayproject" }
+  ]
+};
+
+const video = document.getElementById("video");
+const canvas = document.createElement("canvas");
+const ctx = canvas.getContext("2d");
+const statusDot = document.getElementById("status-dot");
+const statusText = document.getElementById("status-text");
+const liveBadge = document.getElementById("live-badge");
+const sessionBadge = document.getElementById("session-badge");
+const placeholder = document.getElementById("placeholder");
+const btnStart = document.getElementById("btn-start");
+const btnDisconnect = document.getElementById("btn-disconnect");
+const statsEl = document.getElementById("stats");
+
+sessionBadge.textContent = "Session: " + sessionId;
+
+function getDeviceName() {
+  const el = document.getElementById("device-name");
+  return (el && el.value && el.value.trim()) ? el.value.trim() : "Mobile Camera";
+}
+
+function updateState(newState, text = "", dotClass = "") {
+  state = newState;
+  console.log(`[HTS Streamer State] -> ${state} (${text})`);
+  statusText.textContent = text || state;
+  statusDot.className = "";
+  if (dotClass === "streaming" || state === "STREAMING" || state === "FALLBACK_STREAMING") {
+    statusDot.classList.add("streaming");
+  } else if (dotClass === "error" || state === "ERROR" || state === "STOPPED_BY_SERVER") {
+    statusDot.classList.add("error");
+  }
+}
+
+async function loadSystemConfig() {
+  try {
+    const res = await fetch("/api/info");
+    if (res.ok) {
+      const data = await res.json();
+      sysInfo = { ...sysInfo, ...data };
+      console.log("[HTS Streamer] Config loaded:", sysInfo);
+    }
+  } catch (err) {
+    console.warn("[HTS Streamer] Config load warning:", err);
+  }
+}
+loadSystemConfig();
+
+function stopMediaStream() {
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+  if (video) {
+    video.srcObject = null;
+  }
+}
+
+function cleanupConnection() {
+  console.log("[HTS Streamer] Executing connection resource cleanup");
+  if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (iceTimeoutTimer) { clearTimeout(iceTimeoutTimer); iceTimeoutTimer = null; }
+  reconnecting = false;
+
+  if (ws) {
+    ws.onopen = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    try { ws.close(); } catch {}
+    ws = null;
+  }
+
+  if (peerConnection) {
+    console.log(`[HTS RTC ${rtcId}] Closing peer connection`);
+    peerConnection.onicecandidate = null;
+    peerConnection.ontrack = null;
+    peerConnection.onconnectionstatechange = null;
+    peerConnection.oniceconnectionstatechange = null;
+    try { peerConnection.close(); } catch {}
+    peerConnection = null;
+  }
+}
+
+async function openCamera() {
+  if (stream && stream.active && stream.getVideoTracks().length > 0) {
+    const track = stream.getVideoTracks()[0];
+    if (track.readyState === "live") {
+      video.srcObject = stream;
+      placeholder.classList.add("hidden");
+      return true;
+    }
+  }
+
+  stopMediaStream();
+
+  if (!window.isSecureContext) {
+    updateState("ERROR", "Camera requires HTTPS context.", "error");
+    placeholder.classList.remove("hidden");
+    return false;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    updateState("ERROR", "Camera API unavailable.", "error");
+    return false;
+  }
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: sysInfo.default_width || 640 },
+        height: { ideal: sysInfo.default_height || 480 },
+        frameRate: { ideal: sysInfo.default_fps || 30, max: 30 }
+      },
+      audio: false
+    });
+
+    const activeTrack = stream.getVideoTracks()[0];
+    if (activeTrack && activeTrack.getSettings && activeTrack.getSettings().deviceId) {
+      currentVideoDeviceId = activeTrack.getSettings().deviceId;
+    }
+
+    video.srcObject = stream;
+    placeholder.classList.add("hidden");
+    await video.play().catch(() => {});
+    return true;
+  } catch (err) {
+    stopMediaStream();
+    updateState("ERROR", "Camera error: " + (err.message || err.name), "error");
+    placeholder.classList.remove("hidden");
+    return false;
+  }
+}
+
+async function initPeerConnection() {
+  if (peerConnection && (peerConnection.connectionState === "connected" || peerConnection.connectionState === "connecting")) {
+    console.log(`[HTS RTC ${rtcId}] Reusing active peer connection`);
+    return peerConnection;
+  }
+
+  if (peerConnection) {
+    try { peerConnection.close(); } catch {}
+    peerConnection = null;
+  }
+
+  if (!stream) return null;
+
+  rtcId = Math.random().toString(36).substring(2, 8);
+  const iceServers = sysInfo.ice_servers || [{ urls: "stun:stun.l.google.com:19302" }];
+  console.log(`[HTS RTC ${rtcId}] Initializing RTCPeerConnection (ANSWERER) with ICE servers:`, iceServers);
+
+  try {
+    peerConnection = new RTCPeerConnection({ iceServers });
+
+    stream.getTracks().forEach(track => {
+      peerConnection.addTrack(track, stream);
+    });
+
+    const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === "video");
+    if (sender && sender.setParameters) {
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings) params.encodings = [{}];
+        params.encodings[0].maxBitrate = 2500000;
+        params.encodings[0].maxFramerate = 30;
+        params.encodings[0].scaleResolutionDownBy = 1;
+        await sender.setParameters(params);
+      } catch (e) {}
+    }
+
+    peerConnection.onicecandidate = event => {
+      if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "candidate",
+          candidate: event.candidate,
+          sessionId: sessionId,
+          deviceId: deviceId
+        }));
+      }
+    };
+
+    peerConnection.oniceconnectionstatechange = () => {
+      if (!peerConnection) return;
+      console.log(`[HTS RTC ${rtcId}] ICE connection state: ${peerConnection.iceConnectionState}`);
+
+      if (peerConnection.iceConnectionState === "connected" || peerConnection.iceConnectionState === "completed") {
+        if (iceTimeoutTimer) { clearTimeout(iceTimeoutTimer); iceTimeoutTimer = null; }
+        fallbackActive = false;
+        updateState("STREAMING", "WebRTC P2P CONNECTED / LIVE", "streaming");
+      } else if (peerConnection.iceConnectionState === "failed" || peerConnection.iceConnectionState === "disconnected") {
+        console.warn(`[HTS RTC ${rtcId}] WebRTC ICE failed/disconnected. Enabling Fallback JPEG Stream.`);
+        activateFallbackStream();
+      }
+    };
+
+    return peerConnection;
+  } catch (err) {
+    console.error(`[HTS RTC ${rtcId}] Error initializing peer connection:`, err);
+    return null;
+  }
+}
+
+function activateFallbackStream() {
+  if (fallbackActive) return;
+  console.log("[HTS Streamer] Activating Fallback JPEG/WebSocket Stream");
+  fallbackActive = true;
+  if (iceTimeoutTimer) { clearTimeout(iceTimeoutTimer); iceTimeoutTimer = null; }
+
+  if (peerConnection) {
+    try { peerConnection.close(); } catch {}
+    peerConnection = null;
+  }
+
+  updateState("FALLBACK_STREAMING", "FALLBACK STREAMING (JPEG/WS)", "streaming");
+  requestAnimationFrame(sendFrame);
+}
+
+async function handleOfferAndSendAnswer(sdpOffer) {
+  updateState("ICE_CONNECTING", "Establishing WebRTC P2P connection…");
+
+  if (iceTimeoutTimer) clearTimeout(iceTimeoutTimer);
+  iceTimeoutTimer = setTimeout(() => {
+    if (state === "ICE_CONNECTING" || (peerConnection && peerConnection.iceConnectionState !== "connected")) {
+      console.warn("[HTS WebRTC] ICE connection timeout (8s). Falling back to JPEG/WS transport.");
+      activateFallbackStream();
+    }
+  }, 8000);
+
+  const pc = await initPeerConnection();
+  if (!pc) return;
+
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: sdpOffer }));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "answer",
+        sdp: answer.sdp,
+        sessionId: sessionId,
+        deviceId: deviceId,
+        deviceName: getDeviceName()
+      }));
+    }
+  } catch (err) {
+    console.error(`[HTS RTC ${rtcId}] Error creating/sending SDP answer:`, err);
+    activateFallbackStream();
+  }
+}
+
+async function startStreaming() {
+  manuallyStopped = false;
+  fallbackActive = false;
+  reconnectAttempts = 0;
+  btnStart.disabled = true;
+
+  updateState("CONNECTING", "Requesting camera permission…");
+  const success = await openCamera();
+  if (!success) {
+    btnStart.disabled = false;
+    return;
+  }
+
+  connectWebSocket();
+}
+
+function connectWebSocket() {
+  if (manuallyStopped) {
+    console.log("[HTS Streamer] Connect aborted; manuallyStopped is true");
+    return;
+  }
+
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    console.log("[WS] Connection already active, state:", ws.readyState);
+    return;
+  }
+
+  updateState("CONNECTING", "Connecting to signaling server…");
+
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch (err) {
+    console.error("[WS] WebSocket creation error:", err);
+    updateState("ERROR", "WebSocket connection error: " + err.message, "error");
+    scheduleReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    try {
+      console.log("[WS] OPEN");
+      reconnecting = false;
+      reconnectAttempts = 0;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: "ping" })); } catch {}
+        }
+      }, 3000);
+
+      const syncReqTs = Date.now() / 1000.0;
+      ws.send(JSON.stringify({
+        type: "time_sync",
+        client_ts: syncReqTs
+      }));
+
+      const deviceName = getDeviceName();
+      ws.send(JSON.stringify({
+        type: "join",
+        sessionId: sessionId,
+        deviceId: deviceId,
+        deviceName: deviceName,
+        role: "streamer"
+      }));
+
+      updateState("SIGNALING", "CONNECTED / SIGNALING READY", "streaming");
+      liveBadge.classList.add("visible");
+      btnStart.style.display = "none";
+      btnDisconnect.style.display = "";
+      btnStart.disabled = false;
+    } catch (openErr) {
+      console.error("[WS] Error in onopen handler:", openErr);
+      updateState("ERROR", "Signaling setup error: " + openErr.message, "error");
+    }
+  };
+
+  ws.onmessage = async event => {
+    try {
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === "force_disconnect") {
+        console.warn("[HTS Streamer] Force disconnect received from server:", msg.reason);
+        manuallyStopped = true;
+        cleanupConnection();
+        stopMediaStream();
+        updateState("STOPPED_BY_SERVER", "Disconnected by dashboard.", "error");
+        liveBadge.classList.remove("visible");
+        btnStart.style.display = "";
+        btnDisconnect.style.display = "none";
+        btnStart.disabled = false;
+        return;
+      }
+
+      if (msg.type === "time_sync_ack") {
+        const now = Date.now() / 1000.0;
+        const rtt = now - msg.client_ts;
+        clockOffset = msg.server_ts - (msg.client_ts + rtt / 2.0);
+        console.log("[WS] Time sync complete. Clock offset:", (clockOffset * 1000).toFixed(1), "ms");
+      } else if (msg.type === "offer" && msg.sdp) {
+        console.log("[WebRTC] Received SDP Offer from Dashboard Viewer!");
+        handleOfferAndSendAnswer(msg.sdp);
+      } else if ((msg.type === "candidate" || msg.type === "ice-candidate") && msg.candidate) {
+        if (peerConnection && peerConnection.remoteDescription) {
+          try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          } catch (e) {
+            console.warn(`[HTS RTC ${rtcId}] Add ICE candidate warning:`, e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[WS] Signaling parse warning:", e);
+    }
+  };
+
+  ws.onerror = event => {
+    console.error("[WS] ERROR", event);
+  };
+
+  ws.onclose = event => {
+    console.log("[WS] CLOSE code:", event.code, "reason:", event.reason || "(no reason)");
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    liveBadge.classList.remove("visible");
+
+    if (!manuallyStopped) {
+      updateState("DISCONNECTED", `Signaling connection lost (${event.code}). Reconnecting…`, "error");
+      scheduleReconnect();
+    } else {
+      updateState("DISCONNECTED", "Disconnected.", "");
+      btnStart.style.display = "";
+      btnDisconnect.style.display = "none";
+      btnStart.disabled = false;
+    }
+  };
+}
+
+function scheduleReconnect() {
+  if (manuallyStopped || reconnecting) {
+    console.log(`[HTS Streamer] Auto reconnect skipped (manuallyStopped=${manuallyStopped}, reconnecting=${reconnecting})`);
+    return;
+  }
+  reconnecting = true;
+  reconnectAttempts++;
+
+  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
+  console.log(`[HTS Streamer] Scheduling reconnect attempt #${reconnectAttempts} in ${delay} ms`);
+
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnecting = false;
+    if (!manuallyStopped) {
+      connectWebSocket();
+    }
+  }, delay);
+}
+
+function disconnectClient() {
+  console.log("[HTS Streamer] Client clicked Disconnect button");
+  manuallyStopped = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify({ type: "leave", sessionId: sessionId, deviceId: deviceId }));
+    } catch {}
+  }
+  cleanupConnection();
+  stopMediaStream();
+  placeholder.classList.remove("hidden");
+  liveBadge.classList.remove("visible");
+  btnStart.style.display = "";
+  btnDisconnect.style.display = "none";
+  btnStart.disabled = false;
+  updateState("IDLE", "Disconnected by client. Tap Start Streaming to reconnect.");
+  statsEl.textContent = "";
+}
+
+async function flipCamera() {
+  facingMode = facingMode === "environment" ? "user" : "environment";
+  console.log("[HTS Streamer] Flipping camera facingMode to:", facingMode);
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    console.warn("[HTS Streamer] MediaDevices API unavailable for flip");
+    return;
+  }
+
+  try {
+    if (stream) {
+      stream.getVideoTracks().forEach(t => t.stop());
+    }
+
+    let newStream = null;
+    try {
+      newStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { exact: facingMode },
+          width: { ideal: sysInfo.default_width || 640 },
+          height: { ideal: sysInfo.default_height || 480 },
+          frameRate: { ideal: sysInfo.default_fps || 30 }
+        },
+        audio: false
+      });
+    } catch (exactErr) {
+      console.warn("[HTS Streamer] Exact facingMode failed, attempting device enumeration or ideal fallback:", exactErr);
+      const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      const videoInputs = devices.filter(d => d.kind === "videoinput");
+      if (videoInputs.length > 1) {
+        const nextDevice = videoInputs.find(d => d.deviceId !== currentVideoDeviceId) || videoInputs[1];
+        currentVideoDeviceId = nextDevice.deviceId;
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            deviceId: { exact: currentVideoDeviceId },
+            width: { ideal: sysInfo.default_width || 640 },
+            height: { ideal: sysInfo.default_height || 480 }
+          },
+          audio: false
+        });
+      } else {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: sysInfo.default_width || 640 },
+            height: { ideal: sysInfo.default_height || 480 }
+          },
+          audio: false
+        });
+      }
+    }
+
+    if (!newStream) return;
+    const newVideoTrack = newStream.getVideoTracks()[0];
+    if (newVideoTrack.getSettings && newVideoTrack.getSettings().deviceId) {
+      currentVideoDeviceId = newVideoTrack.getSettings().deviceId;
+    }
+
+    if (peerConnection && peerConnection.signalingState !== "closed") {
+      const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === "video");
+      if (sender && newVideoTrack) {
+        console.log("[HTS Streamer] Replacing WebRTC video track with flipped track");
+        await sender.replaceTrack(newVideoTrack).catch(e => console.warn("[HTS Streamer] replaceTrack catch:", e));
+      }
+    }
+
+    stream = newStream;
+    video.srcObject = newStream;
+    await video.play().catch(() => {});
+    console.log("[HTS Streamer] Camera flipped successfully on Android/iOS");
+  } catch (err) {
+    console.error("[HTS Streamer] Camera flip failed:", err);
+    openCamera();
+  }
+}
+
+function sendFrame(timestamp) {
+  if (manuallyStopped || !fallbackActive) return;
+
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    requestAnimationFrame(sendFrame);
+    return;
+  }
+
+  if (ws.bufferedAmount > 128 * 1024) {
+    requestAnimationFrame(sendFrame);
+    return;
+  }
+
+  const fps = sysInfo.default_fps || 24;
+  const targetInterval = 1000 / fps;
+
+  if (timestamp - lastSent < targetInterval) {
+    requestAnimationFrame(sendFrame);
+    return;
+  }
+
+  lastSent = timestamp;
+  const width = video.videoWidth;
+  const height = video.videoHeight;
+
+  if (!width || !height) {
+    requestAnimationFrame(sendFrame);
+    return;
+  }
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  ctx.drawImage(video, 0, 0, width, height);
+  isProcessingFrame = true;
+
+  canvas.toBlob(
+    async blob => {
+      try {
+        if (!blob || manuallyStopped || !ws || ws.readyState !== WebSocket.OPEN) return;
+        if (ws.bufferedAmount > 128 * 1024) return;
+
+        const serverAdjustedTs = (Date.now() / 1000.0) + clockOffset;
+        const arrayBuf = await blob.arrayBuffer();
+
+        const packet = new Uint8Array(12 + arrayBuf.byteLength);
+        packet[0] = 0x48;
+        packet[1] = 0x54;
+        packet[2] = 0x53;
+        packet[3] = 0x31;
+
+        const view = new DataView(packet.buffer);
+        view.setFloat64(4, serverAdjustedTs, true);
+        packet.set(new Uint8Array(arrayBuf), 12);
+
+        ws.send(packet);
+        framesSent++;
+        bytesSent += packet.byteLength;
+
+        const avgKb = (packet.byteLength / 1024).toFixed(1);
+        statsEl.textContent =
+          `Fallback: ${framesSent} frames · ` +
+          `${avgKb} KB/frame · ` +
+          `${width}x${height} · ` +
+          `${fps} FPS`;
+      } catch (err) {
+        console.error("[WS] Frame send error:", err);
+      } finally {
+        isProcessingFrame = false;
+      }
+    },
+    "image/jpeg",
+    (sysInfo.jpeg_quality || 60) / 100
+  );
+
+  requestAnimationFrame(sendFrame);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !manuallyStopped && ws && ws.readyState === WebSocket.CLOSED) {
+    connectWebSocket();
+  }
+});
+
+window.addEventListener("beforeunload", () => {
+  manuallyStopped = true;
+  cleanupConnection();
+  stopMediaStream();
+});
+</script>
+</body>
+</html>
