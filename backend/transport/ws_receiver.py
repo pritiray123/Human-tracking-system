@@ -11,11 +11,41 @@ from backend.devices.registry import registry
 
 router = APIRouter()
 
+_authoritative_active_session: str | None = None
+_active_sessions: Set[str] = set()
 _sessions: Dict[str, Set[WebSocket]] = {}
 _ws_session: Dict[WebSocket, str] = {}
 _ws_device_id: Dict[WebSocket, str] = {}
 _ws_role: Dict[WebSocket, str] = {}
 _connections: Dict[str, WebSocket] = {}
+_session_cleanup_tasks: Dict[str, asyncio.Task] = {}
+
+
+def register_active_session(session_id: str) -> None:
+    global _authoritative_active_session
+    if session_id and str(session_id).strip():
+        sid = str(session_id).strip().upper()
+        _authoritative_active_session = sid
+        _active_sessions.add(sid)
+        print(f"[WS] session_registered session={sid}")
+
+
+def get_active_session() -> str | None:
+    return _authoritative_active_session
+
+
+async def _delayed_remove_session(session_id: str) -> None:
+    try:
+        await asyncio.sleep(5.0)
+        peers = _sessions.get(session_id, set())
+        has_viewer = any(_ws_role.get(ws) == "viewer" for ws in peers)
+        if not has_viewer:
+            _active_sessions.discard(session_id)
+            print(f"[WS] session_removed session={session_id}")
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _session_cleanup_tasks.pop(session_id, None)
 
 
 async def _delayed_remove_device(device_id: str, old_ws: WebSocket) -> None:
@@ -42,188 +72,233 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
 
     current_device_id: str | None = None
     is_explicit_leave: bool = False
-    last_log_time = 0.0
 
     try:
         while True:
             try:
                 msg_raw = await websocket.receive()
-                msg_type_raw = msg_raw.get("type")
+            except Exception:
+                break
 
-                if msg_type_raw == "websocket.disconnect":
-                    print(f"[WS] disconnected reason=websocket_disconnect")
-                    break
+            msg_type_raw = msg_raw.get("type")
+            if msg_type_raw == "websocket.disconnect":
+                print(f"[WS] disconnected reason=websocket_disconnect")
+                break
 
-                data = {}
-                if "text" in msg_raw and msg_raw["text"]:
-                    data["text"] = msg_raw["text"]
-                if "bytes" in msg_raw and msg_raw["bytes"]:
-                    data["bytes"] = msg_raw["bytes"]
+            data = {}
+            if "text" in msg_raw and msg_raw["text"]:
+                data["text"] = msg_raw["text"]
+            if "bytes" in msg_raw and msg_raw["bytes"]:
+                data["bytes"] = msg_raw["bytes"]
 
-                if not data:
+            if not data:
+                continue
+
+            if data.get("text"):
+                try:
+                    msg = json.loads(data["text"])
+                except json.JSONDecodeError:
                     continue
 
-                if data.get("text"):
+                msg_type = msg.get("type")
+
+                if msg_type == "ping":
                     try:
-                        msg = json.loads(data["text"])
-                    except json.JSONDecodeError:
-                        continue
+                        await websocket.send_text(json.dumps({"type": "pong"}))
+                    except Exception:
+                        pass
+                    continue
 
-                    msg_type = msg.get("type")
+                if msg_type == "time_sync":
+                    client_ts = msg.get("client_ts", 0.0)
+                    server_ts = time.time()
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "time_sync_ack",
+                            "client_ts": client_ts,
+                            "server_ts": server_ts
+                        }))
+                    except Exception:
+                        pass
+                    continue
 
-                    if msg_type == "ping":
-                        try:
-                            await websocket.send_text(json.dumps({"type": "pong"}))
-                        except Exception:
-                            pass
-                        continue
+                raw_sid = msg.get("session_id") or msg.get("sessionId") or msg.get("session")
+                incoming_session = str(raw_sid or "").strip().upper()
+                role = msg.get("role", "viewer")
+                dev_id = msg.get("deviceId") or msg.get("device_id")
+                dev_name = msg.get("deviceName") or msg.get("device_name") or "Remote Camera"
 
-                    if msg_type == "time_sync":
-                        client_ts = msg.get("client_ts", 0.0)
-                        server_ts = time.time()
+                source_type = msg.get("sourceType") or msg.get("source_type") or "camera"
+                source_name = msg.get("sourceName") or msg.get("source_name") or "phone_camera"
+                playback_state = msg.get("playbackState") or msg.get("playback_state") or ("PLAYING" if source_type == "video" else "STREAMING")
+
+                if role == "viewer" and incoming_session:
+                    register_active_session(incoming_session)
+                    if incoming_session in _session_cleanup_tasks:
+                        task = _session_cleanup_tasks.pop(incoming_session)
+                        task.cancel()
+
+                # STRICT SESSION VALIDATION FOR STREAMERS (BEFORE ANY DEVICE LOOKUP OR REGISTRATION)
+                if role == "streamer" or msg_type == "join" and role == "streamer":
+                    active_session = str(get_active_session() or "").strip().upper()
+                    is_match = bool(incoming_session and (incoming_session == active_session or incoming_session in _active_sessions))
+
+                    print(f"[SESSION] active={active_session or '(none)'} incoming={incoming_session or '(none)'} match={is_match}")
+
+                    if not is_match:
+                        print(f"[SESSION] rejected streamer due to session mismatch")
                         try:
                             await websocket.send_text(json.dumps({
-                                "type": "time_sync_ack",
-                                "client_ts": client_ts,
-                                "server_ts": server_ts
+                                "type": "error",
+                                "code": "SESSION_MISMATCH",
+                                "message": "Invalid pairing session"
+                            }))
+                            await asyncio.sleep(0.05)
+                            await websocket.close()
+                        except Exception:
+                            pass
+                        break
+
+                target_dev_id = current_device_id or dev_id
+                if target_dev_id:
+                    active_cam = registry.get(target_dev_id)
+                    if isinstance(active_cam, RemoteCamera):
+                        active_cam.touch()
+
+                if msg_type == "join":
+                    session_id = incoming_session
+                    if not session_id:
+                        print(f"[WS] join_rejected reason=missing_session")
+                        try:
+                            await websocket.send_text(json.dumps({
+                                "type": "error",
+                                "code": "INVALID_SESSION",
+                                "message": "Missing pairing session ID"
                             }))
                         except Exception:
                             pass
                         continue
 
-                    session_id = msg.get("sessionId") or msg.get("session") or "default"
-                    role = msg.get("role", "viewer")
-                    dev_id = msg.get("deviceId") or msg.get("device_id")
-                    dev_name = msg.get("deviceName", "Remote Camera")
+                    if session_id not in _sessions:
+                        _sessions[session_id] = set()
+                    _sessions[session_id].add(websocket)
+                    _ws_session[websocket] = session_id
+                    _ws_role[websocket] = role
 
-                    source_type = msg.get("sourceType") or msg.get("source_type") or "camera"
-                    source_name = msg.get("sourceName") or msg.get("source_name") or "phone_camera"
-                    playback_state = msg.get("playbackState") or msg.get("playback_state") or ("PLAYING" if source_type == "video" else "STREAMING")
+                    if role == "streamer":
+                        if dev_id:
+                            current_device_id = dev_id
+                            _ws_device_id[websocket] = dev_id
+                            _connections[dev_id] = websocket
 
-                    target_dev_id = current_device_id or dev_id
-                    if target_dev_id:
-                        active_cam = registry.get(target_dev_id)
-                        if isinstance(active_cam, RemoteCamera):
-                            active_cam.touch()
-
-                    if msg_type == "join":
-                        print(f"[WS] join session={session_id} device={dev_id or current_device_id or 'auto'}")
-                        if session_id not in _sessions:
-                            _sessions[session_id] = set()
-                        _sessions[session_id].add(websocket)
-                        _ws_session[websocket] = session_id
-                        _ws_role[websocket] = role
-
-                        if role == "streamer":
-                            if dev_id:
-                                current_device_id = dev_id
-                                _ws_device_id[websocket] = dev_id
-                                _connections[dev_id] = websocket
-
-                                existing_cam = registry.get(dev_id)
-                                if isinstance(existing_cam, RemoteCamera):
-                                    existing_cam.touch()
-                                    existing_cam.label = dev_name
-                                    existing_cam.source_type = source_type
-                                    existing_cam.source_name = source_name
-                                    existing_cam.playback_state = playback_state
-                                else:
-                                    cam = RemoteCamera(dev_id, dev_name)
-                                    cam.source_type = source_type
-                                    cam.source_name = source_name
-                                    cam.playback_state = playback_state
-                                    cam.open()
-                                    registry.add(cam)
+                            existing_cam = registry.get(dev_id)
+                            if isinstance(existing_cam, RemoteCamera):
+                                existing_cam.touch()
+                                existing_cam.label = dev_name
+                                existing_cam.source_type = source_type
+                                existing_cam.source_name = source_name
+                                existing_cam.playback_state = playback_state
                             else:
-                                current_device_id = uuid.uuid4().hex[:8]
-                                _ws_device_id[websocket] = current_device_id
-                                _connections[current_device_id] = websocket
-                                cam = RemoteCamera(current_device_id, dev_name)
+                                cam = RemoteCamera(dev_id, dev_name)
                                 cam.source_type = source_type
                                 cam.source_name = source_name
                                 cam.playback_state = playback_state
                                 cam.open()
                                 registry.add(cam)
+                        else:
+                            current_device_id = uuid.uuid4().hex[:8]
+                            _ws_device_id[websocket] = current_device_id
+                            _connections[current_device_id] = websocket
+                            cam = RemoteCamera(current_device_id, dev_name)
+                            cam.source_type = source_type
+                            cam.source_name = source_name
+                            cam.playback_state = playback_state
+                            cam.open()
+                            registry.add(cam)
 
-                        await _broadcast_session(session_id, {
-                            "type": "peer-joined",
-                            "sessionId": session_id,
-                            "role": role,
-                            "deviceId": current_device_id or dev_id
-                        })
+                    print(f"[WS] join_accepted session={session_id} device={current_device_id or dev_id or 'viewer'}")
 
-                    elif msg_type == "heartbeat":
-                        h_dev = current_device_id or dev_id or msg.get("device_id") or msg.get("deviceId")
-                        print(f"[WS] heartbeat device={h_dev}")
-                        if h_dev:
-                            cam = registry.get(h_dev)
-                            if isinstance(cam, RemoteCamera):
-                                cam.touch()
+                    await _broadcast_session(session_id, {
+                        "type": "peer-joined",
+                        "sessionId": session_id,
+                        "role": role,
+                        "deviceId": current_device_id or dev_id
+                    })
 
-                    elif msg_type == "update_metadata":
-                        m_dev = current_device_id or dev_id
-                        print(f"[WS] metadata device={m_dev}")
-                        if m_dev:
-                            cam = registry.get(m_dev)
-                            if isinstance(cam, RemoteCamera):
-                                cam.touch()
-                                if dev_name:
-                                    cam.label = dev_name
-                                if "sourceType" in msg or "source_type" in msg:
-                                    cam.source_type = source_type
-                                if "sourceName" in msg or "source_name" in msg:
-                                    cam.source_name = source_name
-                                if "playbackState" in msg or "playback_state" in msg:
-                                    cam.playback_state = playback_state
+                elif msg_type == "heartbeat":
+                    h_dev = current_device_id or dev_id or msg.get("device_id") or msg.get("deviceId")
+                    print(f"[WS] heartbeat device={h_dev}")
+                    if h_dev:
+                        cam = registry.get(h_dev)
+                        if isinstance(cam, RemoteCamera):
+                            cam.touch()
 
-                    elif msg_type in ("offer", "answer", "candidate", "ice-candidate"):
+                elif msg_type == "update_metadata":
+                    m_dev = current_device_id or dev_id
+                    print(f"[WS] metadata device={m_dev}")
+                    if m_dev:
+                        cam = registry.get(m_dev)
+                        if isinstance(cam, RemoteCamera):
+                            cam.touch()
+                            if dev_name:
+                                cam.label = dev_name
+                            if "sourceType" in msg or "source_type" in msg:
+                                cam.source_type = source_type
+                            if "sourceName" in msg or "source_name" in msg:
+                                cam.source_name = source_name
+                            if "playbackState" in msg or "playback_state" in msg:
+                                cam.playback_state = playback_state
+
+                elif msg_type in ("offer", "answer", "candidate", "ice-candidate"):
+                    if incoming_session:
                         payload = {
                             "type": "ice-candidate" if msg_type == "candidate" else msg_type,
-                            "sessionId": session_id,
+                            "sessionId": incoming_session,
                             "sdp": msg.get("sdp"),
                             "candidate": msg.get("candidate"),
                             "deviceId": dev_id,
                             "deviceName": dev_name
                         }
-                        await _notify_session(session_id, websocket, payload)
+                        await _notify_session(incoming_session, websocket, payload)
 
-                    elif msg_type == "video_control":
-                        await _notify_session(session_id, websocket, msg)
+                elif msg_type == "video_control":
+                    if incoming_session:
+                        await _notify_session(incoming_session, websocket, msg)
 
-                    elif msg_type == "leave":
-                        is_explicit_leave = True
-                        break
+                elif msg_type == "leave":
+                    is_explicit_leave = True
+                    break
 
-                elif data.get("bytes"):
-                    raw_bytes = data["bytes"]
-                    if not raw_bytes:
-                        continue
+            elif data.get("bytes"):
+                if websocket not in _ws_session or _ws_role.get(websocket) != "streamer":
+                    continue
 
-                    if not current_device_id:
-                        current_device_id = uuid.uuid4().hex[:8]
-                        _ws_device_id[websocket] = current_device_id
-                        _connections[current_device_id] = websocket
-                        cam = RemoteCamera(current_device_id, f"Remote ({peer_ip})")
-                        cam.open()
-                        registry.add(cam)
+                raw_bytes = data["bytes"]
+                if not raw_bytes:
+                    continue
 
-                    cam = registry.get(current_device_id)
-                    if cam is not None:
-                        cam.touch()
-                        capture_ts = 0.0
-                        jpeg_bytes = raw_bytes
+                if not current_device_id:
+                    current_device_id = uuid.uuid4().hex[:8]
+                    _ws_device_id[websocket] = current_device_id
+                    _connections[current_device_id] = websocket
+                    cam = RemoteCamera(current_device_id, f"Remote ({peer_ip})")
+                    cam.open()
+                    registry.add(cam)
 
-                        if len(raw_bytes) > 12 and raw_bytes[:4] == b"HTS1":
-                            try:
-                                capture_ts = struct.unpack("<d", raw_bytes[4:12])[0]
-                                jpeg_bytes = raw_bytes[12:]
-                            except Exception as header_err:
-                                pass
+                cam = registry.get(current_device_id)
+                if cam is not None:
+                    cam.touch()
+                    capture_ts = 0.0
+                    jpeg_bytes = raw_bytes
 
-                        cam.push_jpeg_bytes(jpeg_bytes, capture_ts=capture_ts)
+                    if len(raw_bytes) > 12 and raw_bytes[:4] == b"HTS1":
+                        try:
+                            capture_ts = struct.unpack("<d", raw_bytes[4:12])[0]
+                            jpeg_bytes = raw_bytes[12:]
+                        except Exception:
+                            pass
 
-            except Exception as msg_err:
-                pass
+                    cam.push_jpeg_bytes(jpeg_bytes, capture_ts=capture_ts)
 
     except Exception as outer_err:
         pass
@@ -232,7 +307,7 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
         print(f"[WS] disconnected reason={reason}")
         session_id = _ws_session.pop(websocket, None)
         dev_id = _ws_device_id.pop(websocket, None)
-        _ws_role.pop(websocket, None)
+        role = _ws_role.pop(websocket, None)
 
         if session_id and session_id in _sessions:
             _sessions[session_id].discard(websocket)
@@ -242,6 +317,13 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                     "sessionId": session_id,
                     "deviceId": dev_id
                 })
+
+            if role == "viewer":
+                has_viewer = any(_ws_role.get(ws) == "viewer" for ws in _sessions[session_id])
+                if not has_viewer and session_id in _active_sessions:
+                    if session_id not in _session_cleanup_tasks:
+                        _session_cleanup_tasks[session_id] = asyncio.create_task(_delayed_remove_session(session_id))
+
             if not _sessions[session_id]:
                 _sessions.pop(session_id, None)
 

@@ -40,6 +40,7 @@ def _generate_session_id() -> str:
 @router.post("/session/new")
 def create_session(request: Request) -> dict:
     session_id = _generate_session_id()
+    ws_receiver.register_active_session(session_id)
     host = config.LOCAL_IP
     port = config.BACKEND_PORT
 

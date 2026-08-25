@@ -361,9 +361,8 @@ function getDeviceId() {
 }
 const deviceId = getDeviceId();
 
-const urlParams = new URLSearchParams(window.location.search);
-const rawSession = urlParams.get("session") || urlParams.get("sessionId");
-const sessionId = (rawSession && rawSession.trim() && rawSession !== "null" && rawSession !== "undefined") ? rawSession.trim() : null;
+const params = new URLSearchParams(window.location.search);
+const sessionId = (params.get("session") || params.get("sessionId") || "").trim().toUpperCase();
 
 const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 const WS_URL = `${wsProtocol}//${window.location.host}/ws/signaling`;
@@ -391,6 +390,8 @@ if (sessionBadge) {
     sessionBadge.textContent = "Session: MISSING";
     sessionBadge.style.borderColor = "var(--danger)";
     sessionBadge.style.color = "var(--danger)";
+    updateState("ERROR", "Invalid or missing pairing session.", "error");
+    if (btnStart) btnStart.disabled = true;
   }
 }
 
@@ -766,10 +767,13 @@ function connectWebSocket() {
       const deviceName = getDeviceName();
       ws.send(JSON.stringify({
         type: "join",
-        sessionId: sessionId,
-        deviceId: deviceId,
-        deviceName: deviceName,
         role: "streamer",
+        session_id: sessionId,
+        sessionId: sessionId,
+        device_id: deviceId,
+        deviceId: deviceId,
+        device_name: deviceName,
+        deviceName: deviceName,
         sourceType: currentSourceType,
         sourceName: currentSourceName,
         playbackState: currentPlaybackState
@@ -793,6 +797,17 @@ function connectWebSocket() {
   ws.onmessage = async event => {
     try {
       const msg = JSON.parse(event.data);
+
+      if (msg.type === "error" && msg.code === "INVALID_SESSION") {
+        console.warn("[HTS Streamer] Session rejected by server:", msg.message);
+        manuallyStopped = true;
+        cleanupConnection();
+        stopMediaStream();
+        updateState("ERROR", msg.message || "Invalid or missing pairing session.", "error");
+        liveBadge.classList.remove("visible");
+        btnStart.disabled = true;
+        return;
+      }
 
       if (msg.type === "force_disconnect") {
         console.warn("[HTS Streamer] Force disconnect received from server:", msg.reason);
