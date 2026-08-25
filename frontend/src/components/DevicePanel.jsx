@@ -119,10 +119,14 @@ export default function DevicePanel({
   }
 
   const baseLocal = streamerUrl || `http://${window.location.hostname}:8000/api/streamer`;
-  const localPairUrl = sessionId ? `${baseLocal}?session=${sessionId}` : baseLocal;
+  const localPairUrl = sessionId
+    ? (baseLocal.includes('?') ? `${baseLocal}&session=${sessionId}` : `${baseLocal}?session=${sessionId}`)
+    : baseLocal;
 
   const basePublic = publicStreamerUrl || `${getPublicUrl()}/api/streamer`;
-  const publicPairUrl = sessionId ? `${basePublic}?session=${sessionId}` : basePublic;
+  const publicPairUrl = sessionId
+    ? (basePublic.includes('?') ? `${basePublic}&session=${sessionId}` : `${basePublic}?session=${sessionId}`)
+    : basePublic;
 
   return (
     <div className="device-panel">

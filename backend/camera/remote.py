@@ -25,6 +25,12 @@ class RemoteCamera(CameraSource):
         self._last_receive_ts:     float = 0.0
 
 
+    def touch(self) -> None:
+        """Refreshes the activity timestamp so active connections remain open."""
+        with self._lock:
+            self._last_update_time = time.time()
+            self._is_open = True
+
     def push_jpeg_bytes(self, jpeg_bytes: bytes, capture_ts: float = 0.0, width: int = 640, height: int = 480) -> None:
         now = time.time()
         with self._lock:
@@ -55,7 +61,9 @@ class RemoteCamera(CameraSource):
             if not self._is_open:
                 return False, None, 0.0
 
-            if time.time() - self._last_update_time > 5.0:
+            age = time.time() - self._last_update_time
+            if age > 5.0:
+                print(f"[REMOTE] stale check age={age:.1f}s")
                 self._is_open = False
                 return False, None, 0.0
 
@@ -75,7 +83,9 @@ class RemoteCamera(CameraSource):
             if not self._is_open:
                 return False, b""
 
-            if time.time() - self._last_update_time > 5.0:
+            age = time.time() - self._last_update_time
+            if age > 5.0:
+                print(f"[REMOTE] stale check age={age:.1f}s")
                 self._is_open = False
                 return False, b""
 
@@ -101,6 +111,7 @@ class RemoteCamera(CameraSource):
     def open(self) -> bool:
         with self._lock:
             self._is_open = True
+            self._last_update_time = time.time()
         return True
 
     def release(self) -> None:

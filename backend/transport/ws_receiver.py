@@ -38,7 +38,7 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     conn_id = uuid.uuid4().hex[:6]
     peer_ip = websocket.client.host if websocket.client else "unknown"
-    print(f"[HTS WS {conn_id}] Connected from {peer_ip}")
+    print(f"[WS] connected")
 
     current_device_id: str | None = None
     is_explicit_leave: bool = False
@@ -51,7 +51,7 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                 msg_type_raw = msg_raw.get("type")
 
                 if msg_type_raw == "websocket.disconnect":
-                    print(f"[HTS WS {conn_id}] Received disconnect event from {peer_ip}")
+                    print(f"[WS] disconnected reason=websocket_disconnect")
                     break
 
                 data = {}
@@ -91,16 +91,23 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                             pass
                         continue
 
-                    session_id = msg.get("sessionId") or "default"
+                    session_id = msg.get("sessionId") or msg.get("session") or "default"
                     role = msg.get("role", "viewer")
-                    dev_id = msg.get("deviceId")
+                    dev_id = msg.get("deviceId") or msg.get("device_id")
                     dev_name = msg.get("deviceName", "Remote Camera")
 
                     source_type = msg.get("sourceType") or msg.get("source_type") or "camera"
                     source_name = msg.get("sourceName") or msg.get("source_name") or "phone_camera"
                     playback_state = msg.get("playbackState") or msg.get("playback_state") or ("PLAYING" if source_type == "video" else "STREAMING")
 
+                    target_dev_id = current_device_id or dev_id
+                    if target_dev_id:
+                        active_cam = registry.get(target_dev_id)
+                        if isinstance(active_cam, RemoteCamera):
+                            active_cam.touch()
+
                     if msg_type == "join":
+                        print(f"[WS] join session={session_id} device={dev_id or current_device_id or 'auto'}")
                         if session_id not in _sessions:
                             _sessions[session_id] = set()
                         _sessions[session_id].add(websocket)
@@ -115,12 +122,11 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
 
                                 existing_cam = registry.get(dev_id)
                                 if isinstance(existing_cam, RemoteCamera):
-                                    existing_cam._is_open = True
+                                    existing_cam.touch()
                                     existing_cam.label = dev_name
                                     existing_cam.source_type = source_type
                                     existing_cam.source_name = source_name
                                     existing_cam.playback_state = playback_state
-                                    print(f"[HTS WS {conn_id}] Streamer '{dev_name}' ({dev_id}) re-attached active socket (Source: {source_type}).")
                                 else:
                                     cam = RemoteCamera(dev_id, dev_name)
                                     cam.source_type = source_type
@@ -128,7 +134,6 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                                     cam.playback_state = playback_state
                                     cam.open()
                                     registry.add(cam)
-                                    print(f"[HTS WS {conn_id}] Streamer '{dev_name}' ({dev_id}) joined session '{session_id}' (Source: {source_type})")
                             else:
                                 current_device_id = uuid.uuid4().hex[:8]
                                 _ws_device_id[websocket] = current_device_id
@@ -140,8 +145,6 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                                 cam.open()
                                 registry.add(cam)
 
-                        print(f"[HTS WS {conn_id}] {role.capitalize()} joined session '{session_id}' from {peer_ip}")
-
                         await _broadcast_session(session_id, {
                             "type": "peer-joined",
                             "sessionId": session_id,
@@ -149,11 +152,21 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                             "deviceId": current_device_id or dev_id
                         })
 
-                    elif msg_type == "update_metadata":
-                        target_dev_id = current_device_id or dev_id
-                        if target_dev_id:
-                            cam = registry.get(target_dev_id)
+                    elif msg_type == "heartbeat":
+                        h_dev = current_device_id or dev_id or msg.get("device_id") or msg.get("deviceId")
+                        print(f"[WS] heartbeat device={h_dev}")
+                        if h_dev:
+                            cam = registry.get(h_dev)
                             if isinstance(cam, RemoteCamera):
+                                cam.touch()
+
+                    elif msg_type == "update_metadata":
+                        m_dev = current_device_id or dev_id
+                        print(f"[WS] metadata device={m_dev}")
+                        if m_dev:
+                            cam = registry.get(m_dev)
+                            if isinstance(cam, RemoteCamera):
+                                cam.touch()
                                 if dev_name:
                                     cam.label = dev_name
                                 if "sourceType" in msg or "source_type" in msg:
@@ -162,7 +175,6 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                                     cam.source_name = source_name
                                 if "playbackState" in msg or "playback_state" in msg:
                                     cam.playback_state = playback_state
-                                print(f"[HTS WS {conn_id}] Updated device '{target_dev_id}' metadata: label='{cam.label}', source_type='{cam.source_type}', state='{cam.playback_state}'")
 
                     elif msg_type in ("offer", "answer", "candidate", "ice-candidate"):
                         payload = {
@@ -176,17 +188,13 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                         await _notify_session(session_id, websocket, payload)
 
                     elif msg_type == "video_control":
-                        print(f"[HTS WS {conn_id}] Relay video_control '{msg.get('action')}' for device '{dev_id}'")
                         await _notify_session(session_id, websocket, msg)
 
-
                     elif msg_type == "leave":
-                        print(f"[HTS WS {conn_id}] Received explicit client leave signal from device '{current_device_id or dev_id}'")
                         is_explicit_leave = True
                         break
 
                 elif data.get("bytes"):
-                    receive_ts = time.time()
                     raw_bytes = data["bytes"]
                     if not raw_bytes:
                         continue
@@ -201,6 +209,7 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
 
                     cam = registry.get(current_device_id)
                     if cam is not None:
+                        cam.touch()
                         capture_ts = 0.0
                         jpeg_bytes = raw_bytes
 
@@ -209,24 +218,18 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                                 capture_ts = struct.unpack("<d", raw_bytes[4:12])[0]
                                 jpeg_bytes = raw_bytes[12:]
                             except Exception as header_err:
-                                print(f"[HTS WS {conn_id}] Header unpack warning: {header_err}")
+                                pass
 
                         cam.push_jpeg_bytes(jpeg_bytes, capture_ts=capture_ts)
-                        store_ts = time.time()
-
-                        curr = time.time()
-                        if curr - last_log_time >= 3.0:
-                            last_log_time = curr
-                            kb_size = round(len(raw_bytes) / 1024.0, 1)
-                            print(f"[HTS LATENCY] Device '{current_device_id}' ({cam.label}) | Size: {kb_size} KB")
 
             except Exception as msg_err:
-                print(f"[HTS WS {conn_id}] Non-fatal message processing error from {peer_ip}: {repr(msg_err)}")
-                continue
+                pass
 
     except Exception as outer_err:
-        print(f"[HTS WS {conn_id}] Outer loop exception for {peer_ip}: {repr(outer_err)}")
+        pass
     finally:
+        reason = "client_left" if is_explicit_leave else "connection_closed"
+        print(f"[WS] disconnected reason={reason}")
         session_id = _ws_session.pop(websocket, None)
         dev_id = _ws_device_id.pop(websocket, None)
         _ws_role.pop(websocket, None)
@@ -248,13 +251,11 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                 _connections.pop(dev_id, None)
             cam = registry.get(dev_id)
             if cam:
-                cam.mark_disconnected()
-
-            if is_explicit_leave:
-                registry.remove(dev_id)
-                print(f"[HTS Device] Immediately removed device from registry on explicit client leave: '{dev_id}'")
-            else:
-                asyncio.create_task(_delayed_remove_device(dev_id, websocket))
+                if is_explicit_leave:
+                    registry.remove(dev_id)
+                else:
+                    cam.mark_disconnected()
+                    asyncio.create_task(_delayed_remove_device(dev_id, websocket))
 
 
 async def _notify_session(session_id: str, sender: WebSocket, payload: dict) -> None:

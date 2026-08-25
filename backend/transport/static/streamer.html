@@ -362,7 +362,8 @@ function getDeviceId() {
 const deviceId = getDeviceId();
 
 const urlParams = new URLSearchParams(window.location.search);
-const sessionId = urlParams.get("session") || urlParams.get("sessionId") || "default";
+const rawSession = urlParams.get("session") || urlParams.get("sessionId");
+const sessionId = (rawSession && rawSession.trim() && rawSession !== "null" && rawSession !== "undefined") ? rawSession.trim() : null;
 
 const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 const WS_URL = `${wsProtocol}//${window.location.host}/ws/signaling`;
@@ -381,7 +382,45 @@ const httpsNotice = document.getElementById("https-notice");
 const httpsLink = document.getElementById("https-link");
 const statsEl = document.getElementById("stats");
 
-sessionBadge.textContent = "Session: " + sessionId;
+if (sessionBadge) {
+  if (sessionId) {
+    sessionBadge.textContent = "Session: " + sessionId;
+    sessionBadge.style.borderColor = "";
+    sessionBadge.style.color = "";
+  } else {
+    sessionBadge.textContent = "Session: MISSING";
+    sessionBadge.style.borderColor = "var(--danger)";
+    sessionBadge.style.color = "var(--danger)";
+  }
+}
+
+let heartbeatTimer = null;
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({
+          type: "heartbeat",
+          session: sessionId,
+          sessionId: sessionId,
+          device_id: deviceId,
+          deviceId: deviceId
+        }));
+      } catch (e) {
+        console.warn("[STREAMER] heartbeat send error:", e);
+      }
+    }
+  }, 2000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
 
 function getDeviceName() {
   const el = document.getElementById("device-name");
@@ -456,6 +495,7 @@ function stopMediaStream() {
 
 function cleanupConnection() {
   console.log("[HTS Streamer] Executing connection resource cleanup");
+  stopHeartbeat();
   isSendingFrames = false;
   isProcessingFrame = false;
   if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
@@ -652,6 +692,13 @@ async function handleOfferAndSendAnswer(sdpOffer) {
 }
 
 async function startStreaming() {
+  if (!sessionId) {
+    console.error("[STREAMER] Cannot start streaming: missing session ID in URL");
+    updateState("ERROR", "Missing pairing session ID in URL. Open pairing link from dashboard.", "error");
+    btnStart.disabled = false;
+    return;
+  }
+
   manuallyStopped = false;
   reconnectAttempts = 0;
   btnStart.disabled = true;
@@ -727,6 +774,8 @@ function connectWebSocket() {
         sourceName: currentSourceName,
         playbackState: currentPlaybackState
       }));
+
+      startHeartbeat();
 
       updateState("STREAMING", "CONNECTED / STREAMING LIVE", "streaming");
       liveBadge.classList.add("visible");

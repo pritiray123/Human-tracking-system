@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import CameraFeed from './components/CameraFeed';
 import DevicePanel from './components/DevicePanel';
 import StatusBar from './components/StatusBar';
-import { getSystemInfo, setActiveDevice as apiSetActiveDevice, disconnectDevice as apiDisconnectDevice } from './services/api';
+import { getSystemInfo, createSession, setActiveDevice as apiSetActiveDevice, disconnectDevice as apiDisconnectDevice } from './services/api';
 
 export default function App() {
   const [devices, setDevices] = useState([]);
@@ -29,11 +29,22 @@ export default function App() {
       try {
         const info = await getSystemInfo();
         if (!mounted) return;
-        setSessionId(info.session_id || '');
+
+        let sessId = info.session_id;
+        if (!sessId) {
+          try {
+            const sessData = await createSession();
+            sessId = sessData.session_id;
+          } catch (err) {
+            console.warn('[HTS Dashboard] createSession fallback warning:', err);
+          }
+        }
+
+        setSessionId(sessId || '');
         if (info.ice_servers && Array.isArray(info.ice_servers)) {
           iceServersRef.current = info.ice_servers;
         }
-        connectSignalingWS(info.session_id);
+        connectSignalingWS(sessId);
       } catch (e) {
         console.error('[HTS Dashboard] System info init error:', e);
       }
