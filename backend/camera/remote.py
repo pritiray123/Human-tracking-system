@@ -11,6 +11,9 @@ class RemoteCamera(CameraSource):
     def __init__(self, device_id: str, label: str) -> None:
         self._device_id           = device_id
         self._label               = label
+        self._source_type: str    = "camera"
+        self._source_name: str    = "phone_camera"
+        self._playback_state: str = "STREAMING"
         self._lock                = threading.Lock()
         self._latest_frame:        np.ndarray | None = None
         self._latest_jpeg_bytes:   bytes | None = None
@@ -20,6 +23,7 @@ class RemoteCamera(CameraSource):
         self._last_update_time:    float = time.time()
         self._last_capture_ts:     float = 0.0
         self._last_receive_ts:     float = 0.0
+
 
     def push_jpeg_bytes(self, jpeg_bytes: bytes, capture_ts: float = 0.0, width: int = 640, height: int = 480) -> None:
         now = time.time()
@@ -146,3 +150,36 @@ class RemoteCamera(CameraSource):
     def is_open(self) -> bool:
         with self._lock:
             return self._is_open
+
+    @property
+    def source_type(self) -> str:
+        with self._lock:
+            return self._source_type
+
+    @source_type.setter
+    def source_type(self, value: str) -> None:
+        with self._lock:
+            self._source_type = value
+
+    @property
+    def source_name(self) -> str:
+        with self._lock:
+            return self._source_name
+
+    @source_name.setter
+    def source_name(self, value: str) -> None:
+        with self._lock:
+            self._source_name = value
+
+    @property
+    def playback_state(self) -> str:
+        with self._lock:
+            if not self._is_open:
+                return "STOPPED"
+            return self._playback_state
+
+    @playback_state.setter
+    def playback_state(self, value: str) -> None:
+        with self._lock:
+            self._playback_state = value
+

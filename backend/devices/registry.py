@@ -13,10 +13,17 @@ class DeviceRegistry:
 
     def add(self, cam: CameraSource) -> None:
         with self._lock:
+            old_cam = self._devices.get(cam.device_id)
+            if old_cam is not None and old_cam is not cam:
+                try:
+                    old_cam.release()
+                except Exception as e:
+                    print(f"[HTS Registry] Exception releasing replaced device '{cam.device_id}': {e}")
             self._devices[cam.device_id] = cam
             if self._active_id is None or self._active_id not in self._devices:
                 self._active_id = cam.device_id
                 print(f"[HTS Backend] Auto-set active device to: '{self._active_id}'")
+
 
     def remove(self, device_id: str) -> None:
         with self._lock:

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getActiveStreamUrl } from '../services/api';
+import { getActiveStreamUrl, controlDeviceVideo } from '../services/api';
 
 export default function CameraFeed({
   activeDevice,
@@ -9,6 +9,7 @@ export default function CameraFeed({
 }) {
   const videoRef = useRef(null);
   const [actualStatus, setActualStatus] = useState('CONNECTING');
+  const [isLooping, setIsLooping] = useState(true);
   const lastTimeRef = useRef(0);
   const stallCountRef = useRef(0);
 
@@ -55,6 +56,22 @@ export default function CameraFeed({
     };
   }, [remoteStream, webrtcStatus]);
 
+  const handleControl = async (action, extraParams = {}) => {
+    if (!activeDevice) return;
+    try {
+      console.log(`[HTS Feed] Controlling video '${action}' for device:`, activeDevice.id);
+      await controlDeviceVideo(activeDevice.id, action, extraParams);
+    } catch (e) {
+      console.warn('[HTS Feed] Control device video catch:', e);
+    }
+  };
+
+  const toggleLoop = () => {
+    const nextVal = !isLooping;
+    setIsLooping(nextVal);
+    handleControl('loop', { loop: nextVal });
+  };
+
   if (!activeDevice) {
     return (
       <div className="camera-feed">
@@ -70,6 +87,7 @@ export default function CameraFeed({
   }
 
   const isRemote = activeDevice.type === 'remote' || !activeDevice.id.startsWith('local:');
+  const isVideoSource = activeDevice.source_type === 'video';
   const hasWebRTCStream = isRemote && Boolean(remoteStream);
   const streamUrl = getActiveStreamUrl(activeDevice.id);
 
@@ -85,7 +103,7 @@ export default function CameraFeed({
     : '';
 
   return (
-    <div className="camera-feed">
+    <div className="camera-feed" style={{ position: 'relative' }}>
       {hasWebRTCStream ? (
         <video
           ref={videoRef}
@@ -122,7 +140,7 @@ export default function CameraFeed({
         <span
           className="feed-fps"
           style={{
-            color: statusLabel === 'STREAMING (P2P)' || statusLabel === 'LIVE'
+            color: (statusLabel === 'STREAMING (P2P)' || statusLabel === 'LIVE' || statusLabel === 'PLAYING')
               ? '#00c896'
               : statusLabel === 'STALLED'
                 ? '#e05050'
@@ -132,6 +150,110 @@ export default function CameraFeed({
           {statusLabel}{statsBadgeText}
         </span>
       </div>
+
+      {isVideoSource && (
+        <div
+          className="video-controls-bar"
+          style={{
+            position: 'absolute',
+            bottom: '12px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'rgba(15, 15, 26, 0.85)',
+            border: '1px solid #2a2a45',
+            backdropFilter: 'blur(8px)',
+            borderRadius: '10px',
+            padding: '8px 14px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            zIndex: 10
+          }}
+        >
+          <button
+            onClick={() => handleControl('play')}
+            style={{
+              background: '#00c896',
+              color: '#000',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontWeight: 700,
+              fontSize: '0.78rem',
+              cursor: 'pointer'
+            }}
+          >
+            ▶ Play
+          </button>
+
+          <button
+            onClick={() => handleControl('pause')}
+            style={{
+              background: '#2a2a45',
+              color: '#e0e0e0',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontWeight: 600,
+              fontSize: '0.78rem',
+              cursor: 'pointer'
+            }}
+          >
+            ⏸ Pause
+          </button>
+
+          <button
+            onClick={() => handleControl('stop')}
+            style={{
+              background: '#e05050',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontWeight: 600,
+              fontSize: '0.78rem',
+              cursor: 'pointer'
+            }}
+          >
+            ⏹ Stop
+          </button>
+
+          <button
+            onClick={() => handleControl('restart')}
+            style={{
+              background: '#2a2a45',
+              color: '#e0e0e0',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '6px 12px',
+              fontWeight: 600,
+              fontSize: '0.78rem',
+              cursor: 'pointer'
+            }}
+          >
+            ↻ Restart
+          </button>
+
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontSize: '0.78rem',
+              color: '#e0e0e0',
+              cursor: 'pointer',
+              marginLeft: '4px'
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={isLooping}
+              onChange={toggleLoop}
+            />
+            🔁 Loop
+          </label>
+        </div>
+      )}
     </div>
   );
-}
+}

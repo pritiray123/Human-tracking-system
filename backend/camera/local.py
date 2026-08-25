@@ -113,3 +113,16 @@ class LocalCamera(CameraSource):
     @property
     def is_open(self) -> bool:
         return self._is_open
+
+    @property
+    def source_type(self) -> str:
+        return "camera"
+
+    @property
+    def source_name(self) -> str:
+        return "webcam"
+
+    @property
+    def playback_state(self) -> str:
+        return "STREAMING" if self._is_open else "STOPPED"
+

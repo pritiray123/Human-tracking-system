@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   getDevices,
   setActiveDevice,
   disconnectDevice,
   getSystemInfo,
-  getPublicUrl
+  getPublicUrl,
+  setLocalSourceCamera,
+  setLocalSourceVideo
 } from '../services/api';
 
 export default function DevicePanel({
@@ -19,6 +21,9 @@ export default function DevicePanel({
   const [streamerUrl, setStreamerUrl] = useState('');
   const [publicStreamerUrl, setPublicStreamerUrl] = useState('');
   const [turnConfigured, setTurnConfigured] = useState(false);
+  const [localSourceMode, setLocalSourceMode] = useState('camera'); // 'camera' | 'video'
+  const fileInputRef = useRef(null);
+
 
   useEffect(() => {
     let mounted = true;
@@ -83,6 +88,36 @@ export default function DevicePanel({
     }
   }
 
+  async function handleSwitchToCamera() {
+    setLoading(true);
+    try {
+      await setLocalSourceCamera();
+      setLocalSourceMode('camera');
+      const data = await getDevices();
+      setDevices(data);
+    } catch (e) {
+      console.error('[HTS UI] Failed to switch local source to camera:', e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleLocalFileChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setLoading(true);
+    try {
+      await setLocalSourceVideo(file);
+      setLocalSourceMode('video');
+      const data = await getDevices();
+      setDevices(data);
+    } catch (err) {
+      console.error('[HTS UI] Failed to switch local source to video:', err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   const baseLocal = streamerUrl || `http://${window.location.hostname}:8000/api/streamer`;
   const localPairUrl = sessionId ? `${baseLocal}?session=${sessionId}` : baseLocal;
 
@@ -92,6 +127,76 @@ export default function DevicePanel({
   return (
     <div className="device-panel">
       <h2>Device Manager</h2>
+
+      <div className="laptop-source-box" style={{ background: '#1a1a2e', border: '1px solid #2a2a45', borderRadius: '10px', padding: '14px', marginBottom: '14px' }}>
+        <p style={{ fontSize: '0.8rem', fontWeight: 700, color: '#00c896', marginBottom: '8px' }}>LAPTOP SOURCE</p>
+        <div style={{ display: 'flex', gap: '8px', marginBottom: localSourceMode === 'video' ? '8px' : '0' }}>
+          <button
+            onClick={handleSwitchToCamera}
+            disabled={loading}
+            style={{
+              flex: 1,
+              padding: '8px 12px',
+              borderRadius: '6px',
+              border: 'none',
+              fontWeight: 600,
+              cursor: 'pointer',
+              background: localSourceMode === 'camera' ? '#00c896' : '#2a2a45',
+              color: localSourceMode === 'camera' ? '#000' : '#e0e0e0'
+            }}
+          >
+            📷 Camera
+          </button>
+
+          <button
+            onClick={() => {
+              setLocalSourceMode('video');
+              fileInputRef.current?.click();
+            }}
+            disabled={loading}
+            style={{
+              flex: 1,
+              padding: '8px 12px',
+              borderRadius: '6px',
+              border: 'none',
+              fontWeight: 600,
+              cursor: 'pointer',
+              background: localSourceMode === 'video' ? '#00c896' : '#2a2a45',
+              color: localSourceMode === 'video' ? '#000' : '#e0e0e0'
+            }}
+          >
+            🎬 Video File
+          </button>
+        </div>
+
+        <input
+          type="file"
+          ref={fileInputRef}
+          accept="video/mp4,video/webm,video/ogg,video/*"
+          onChange={handleLocalFileChange}
+          style={{ display: 'none' }}
+        />
+
+        {localSourceMode === 'video' && (
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            style={{
+              width: '100%',
+              padding: '8px',
+              background: '#2a2a45',
+              color: '#00c896',
+              border: '1px solid #00c896',
+              borderRadius: '6px',
+              fontSize: '0.78rem',
+              fontWeight: 600,
+              cursor: 'pointer'
+            }}
+          >
+            📁 Choose Video File
+          </button>
+        )}
+      </div>
 
       {!turnConfigured && (
         <div
@@ -152,6 +257,10 @@ export default function DevicePanel({
           <ul className="device-list">
             {devices.map(dev => {
               const isActive = dev.id === activeDeviceId || dev.is_active;
+              const isVideo = dev.source_type === 'video';
+              const sourceLabel = isVideo
+                ? `🎬 ${dev.source_name || dev.label}`
+                : `📷 Live Camera`;
               const statusText = dev.status || (dev.is_open ? 'STREAMING' : 'WAITING');
               const latencyText = dev.latency_ms > 0 ? ` · ${dev.latency_ms} ms` : '';
 
@@ -161,12 +270,15 @@ export default function DevicePanel({
                     <span className={`device-status-dot ${dev.is_open ? 'open' : 'closed'}`} />
                     <div>
                       <p className="device-label">{dev.label}</p>
+                      <p className="device-meta" style={{ fontSize: '0.72rem', color: '#aaa', marginTop: '2px' }}>
+                        Source: {sourceLabel}
+                      </p>
                       <p className="device-meta">
                         {dev.width > 0 ? `${dev.width}×${dev.height} · ` : ''}
                         Status:{' '}
                         <strong
                           style={{
-                            color: statusText.toUpperCase() === 'STREAMING'
+                            color: (statusText.toUpperCase() === 'STREAMING' || statusText.toUpperCase() === 'PLAYING')
                               ? '#00c896'
                               : '#ffaa00'
                           }}
@@ -203,4 +315,4 @@ export default function DevicePanel({
       </div>
     </div>
   );
-}
+}

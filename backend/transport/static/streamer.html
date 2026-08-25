@@ -87,11 +87,16 @@
 </header>
 
 <div class="card">
+  <div style="display:flex; gap:8px; margin-bottom:12px;">
+    <button id="mode-cam-btn" onclick="selectSourceMode('camera')" style="flex:1; padding:10px; background:var(--accent); color:#000; font-weight:700; border-radius:8px; border:none; cursor:pointer;">📷 Live Camera</button>
+    <button id="mode-vid-btn" onclick="selectSourceMode('video')" style="flex:1; padding:10px; background:var(--border); color:var(--text); font-weight:700; border-radius:8px; border:none; cursor:pointer;">🎬 Video File</button>
+  </div>
+
   <div id="preview-wrap">
     <video id="video" autoplay playsinline muted></video>
     <div id="placeholder">
-      <span>📷 Camera preview will appear here</span>
-      <span style="font-size:0.75rem; color:#666;">Tap Start Streaming to enable camera</span>
+      <span id="placeholder-main-text">📷 Camera preview will appear here</span>
+      <span id="placeholder-sub-text" style="font-size:0.75rem; color:#666;">Tap Start Streaming to enable camera</span>
     </div>
     <div id="live-badge">● LIVE</div>
     <div id="session-badge">Session: ---</div>
@@ -110,6 +115,22 @@
   <p class="field-label">Device name (shown on dashboard)</p>
   <input id="device-name" type="text" maxlength="40" placeholder="e.g. iPhone, Mobile Cam 1" />
 
+  <input type="file" id="phone-file-input" accept="video/mp4,video/webm,video/ogg,video/*" style="display:none;" onchange="onPhoneVideoFileSelected(event)" />
+
+  <div id="video-file-controls" style="display:none; flex-direction:column; gap:8px; margin-top:12px;">
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button onclick="document.getElementById('phone-file-input').click()" style="flex:1; background:#2a2a45; color:var(--accent); padding:10px; border-radius:8px; font-size:0.82rem;">📁 Choose Video File</button>
+      <button onclick="restartPhoneVideo()" style="background:var(--border); color:var(--text); padding:10px; border-radius:8px; font-size:0.82rem;">↻ Restart</button>
+    </div>
+    <p id="selected-file-label" style="font-size:0.75rem; color:var(--text-dim); text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></p>
+    <div style="display:flex; gap:8px; align-items:center; justify-content:center;">
+      <button id="btn-phone-playpause" onclick="togglePhoneVideoPlayPause()" style="flex:1; background:var(--accent); color:#000; padding:10px; border-radius:8px; font-size:0.82rem; font-weight:700;">⏸ Pause</button>
+      <label style="font-size:0.78rem; color:var(--text); display:flex; align-items:center; gap:4px; cursor:pointer;">
+        <input type="checkbox" id="phone-loop-chk" checked onchange="togglePhoneVideoLoop(this.checked)" /> Loop
+      </label>
+    </div>
+  </div>
+
   <div class="controls">
     <button id="btn-start" onclick="startStreaming()">▶ Start Streaming</button>
     <button id="btn-disconnect" onclick="disconnectClient()">🛑 Disconnect</button>
@@ -118,6 +139,7 @@
 
   <div id="stats"></div>
 </div>
+
 
 <p class="info">Powered by Controlled State-Machine Transport</p>
 
@@ -140,6 +162,176 @@ let framesSent = 0;
 let bytesSent = 0;
 let facingMode = "environment";
 let currentVideoDeviceId = null;
+let currentSourceType = "camera";
+let currentSourceName = "phone_camera";
+let currentPlaybackState = "STREAMING";
+let videoObjectUrl = null;
+let isLooping = true;
+
+function selectSourceMode(mode) {
+  if (currentSourceType === mode) return;
+  currentSourceType = mode;
+  console.log("[HTS Streamer] Switching source mode to:", mode);
+
+  const camBtn = document.getElementById("mode-cam-btn");
+  const vidBtn = document.getElementById("mode-vid-btn");
+  const vidControls = document.getElementById("video-file-controls");
+  const btnFlip = document.getElementById("btn-flip");
+  const placeholderMain = document.getElementById("placeholder-main-text");
+  const placeholderSub = document.getElementById("placeholder-sub-text");
+
+  if (mode === "camera") {
+    camBtn.style.background = "var(--accent)";
+    camBtn.style.color = "#000";
+    vidBtn.style.background = "var(--border)";
+    vidBtn.style.color = "var(--text)";
+
+    vidControls.style.display = "none";
+    if (btnFlip) btnFlip.style.display = "block";
+    if (placeholderMain) placeholderMain.textContent = "📷 Camera preview will appear here";
+    if (placeholderSub) placeholderSub.textContent = "Tap Start Streaming to enable camera";
+
+    currentSourceName = getDeviceName();
+    currentPlaybackState = "STREAMING";
+
+    if (videoObjectUrl) {
+      URL.revokeObjectURL(videoObjectUrl);
+      videoObjectUrl = null;
+    }
+
+    if (!manuallyStopped && ws && ws.readyState === WebSocket.OPEN) {
+      openCamera().then(() => {
+        updateWebRTCTrack();
+        sendMetadataUpdate();
+      });
+    }
+  } else {
+    vidBtn.style.background = "var(--accent)";
+    vidBtn.style.color = "#000";
+    camBtn.style.background = "var(--border)";
+    camBtn.style.color = "var(--text)";
+
+    vidControls.style.display = "flex";
+    if (btnFlip) btnFlip.style.display = "none";
+    if (placeholderMain) placeholderMain.textContent = "🎬 Select a video file to stream";
+    if (placeholderSub) placeholderSub.textContent = "Tap Choose Video File below";
+
+    stopMediaStream();
+    sendMetadataUpdate();
+
+    const fileInput = document.getElementById("phone-file-input");
+    if (fileInput && fileInput.files && fileInput.files[0]) {
+      // already selected
+    } else if (fileInput) {
+      fileInput.click();
+    }
+  }
+}
+
+function onPhoneVideoFileSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  stopMediaStream();
+
+  if (videoObjectUrl) {
+    URL.revokeObjectURL(videoObjectUrl);
+  }
+  videoObjectUrl = URL.createObjectURL(file);
+  video.srcObject = null;
+  video.src = videoObjectUrl;
+  video.loop = isLooping;
+
+  currentSourceName = file.name;
+  currentPlaybackState = "PLAYING";
+
+  const label = document.getElementById("selected-file-label");
+  if (label) label.textContent = "Selected: " + file.name;
+
+  placeholder.classList.add("hidden");
+
+  video.play().then(() => {
+    console.log("[HTS Streamer] Phone video playing:", file.name);
+    updateWebRTCTrack();
+    sendMetadataUpdate();
+
+    if (!manuallyStopped && (!ws || ws.readyState !== WebSocket.OPEN)) {
+      connectWebSocket();
+    }
+  }).catch(err => {
+    console.warn("[HTS Streamer] Phone video play catch:", err);
+  });
+}
+
+function togglePhoneVideoPlayPause() {
+  const btn = document.getElementById("btn-phone-playpause");
+  if (!video) return;
+
+  if (video.paused) {
+    video.play().catch(() => {});
+    currentPlaybackState = "PLAYING";
+    if (btn) btn.textContent = "⏸ Pause";
+  } else {
+    video.pause();
+    currentPlaybackState = "PAUSED";
+    if (btn) btn.textContent = "▶ Play";
+  }
+  sendMetadataUpdate();
+}
+
+function restartPhoneVideo() {
+  if (!video) return;
+  video.currentTime = 0;
+  video.play().catch(() => {});
+  currentPlaybackState = "PLAYING";
+  const btn = document.getElementById("btn-phone-playpause");
+  if (btn) btn.textContent = "⏸ Pause";
+  sendMetadataUpdate();
+}
+
+function togglePhoneVideoLoop(val) {
+  isLooping = Boolean(val);
+  if (video) video.loop = isLooping;
+  sendMetadataUpdate();
+}
+
+function sendMetadataUpdate() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "update_metadata",
+      sessionId: sessionId,
+      deviceId: deviceId,
+      deviceName: getDeviceName(),
+      sourceType: currentSourceType,
+      sourceName: currentSourceName,
+      playbackState: currentPlaybackState
+    }));
+  }
+}
+
+function updateWebRTCTrack() {
+  if (!peerConnection || peerConnection.signalingState === "closed") return;
+  let newTrack = null;
+
+  if (currentSourceType === "camera" && stream) {
+    newTrack = stream.getVideoTracks()[0];
+  } else if (currentSourceType === "video" && video) {
+    if (typeof video.captureStream === "function" || typeof video.mozCaptureStream === "function") {
+      const vStream = (video.captureStream || video.mozCaptureStream).call(video);
+      if (vStream && vStream.getVideoTracks().length > 0) {
+        newTrack = vStream.getVideoTracks()[0];
+      }
+    }
+  }
+
+  if (newTrack) {
+    const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === "video");
+    if (sender) {
+      sender.replaceTrack(newTrack).catch(e => console.warn("[WebRTC] replaceTrack catch:", e));
+    }
+  }
+}
+
 
 let pingTimer = null;
 let reconnectTimer = null;
@@ -464,15 +656,23 @@ async function startStreaming() {
   reconnectAttempts = 0;
   btnStart.disabled = true;
 
-  updateState("CONNECTING", "Requesting camera permission…");
-  const success = await openCamera();
-  if (!success) {
-    btnStart.disabled = false;
-    return;
+  if (currentSourceType === "camera") {
+    updateState("CONNECTING", "Requesting camera permission…");
+    const success = await openCamera();
+    if (!success) {
+      btnStart.disabled = false;
+      return;
+    }
+  } else {
+    updateState("CONNECTING", "Preparing video stream…");
+    if (videoObjectUrl && video && video.paused) {
+      video.play().catch(() => {});
+    }
   }
 
   connectWebSocket();
 }
+
 
 function connectWebSocket() {
   if (manuallyStopped) {
@@ -522,7 +722,10 @@ function connectWebSocket() {
         sessionId: sessionId,
         deviceId: deviceId,
         deviceName: deviceName,
-        role: "streamer"
+        role: "streamer",
+        sourceType: currentSourceType,
+        sourceName: currentSourceName,
+        playbackState: currentPlaybackState
       }));
 
       updateState("STREAMING", "CONNECTED / STREAMING LIVE", "streaming");
@@ -553,6 +756,39 @@ function connectWebSocket() {
         return;
       }
 
+      if (msg.type === "video_control") {
+        console.log("[HTS Streamer] Received video_control signal from server:", msg.action);
+        if (currentSourceType === "video" && video) {
+          const btn = document.getElementById("btn-phone-playpause");
+          if (msg.action === "play") {
+            video.play().catch(() => {});
+            currentPlaybackState = "PLAYING";
+            if (btn) btn.textContent = "⏸ Pause";
+          } else if (msg.action === "pause") {
+            video.pause();
+            currentPlaybackState = "PAUSED";
+            if (btn) btn.textContent = "▶ Play";
+          } else if (msg.action === "stop") {
+            video.pause();
+            video.currentTime = 0;
+            currentPlaybackState = "STOPPED";
+            if (btn) btn.textContent = "▶ Play";
+          } else if (msg.action === "restart") {
+            video.currentTime = 0;
+            video.play().catch(() => {});
+            currentPlaybackState = "PLAYING";
+            if (btn) btn.textContent = "⏸ Pause";
+          } else if (msg.action === "loop" && typeof msg.loop === "boolean") {
+            isLooping = msg.loop;
+            video.loop = isLooping;
+            const chk = document.getElementById("phone-loop-chk");
+            if (chk) chk.checked = isLooping;
+          }
+          sendMetadataUpdate();
+        }
+        return;
+      }
+
       if (msg.type === "time_sync_ack") {
         const now = Date.now() / 1000.0;
         const rtt = now - msg.client_ts;
@@ -574,6 +810,7 @@ function connectWebSocket() {
       console.warn("[WS] Signaling parse warning:", e);
     }
   };
+
 
   ws.onerror = event => {
     console.error("[WS] ERROR", event);

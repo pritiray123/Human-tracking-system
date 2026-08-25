@@ -96,6 +96,10 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                     dev_id = msg.get("deviceId")
                     dev_name = msg.get("deviceName", "Remote Camera")
 
+                    source_type = msg.get("sourceType") or msg.get("source_type") or "camera"
+                    source_name = msg.get("sourceName") or msg.get("source_name") or "phone_camera"
+                    playback_state = msg.get("playbackState") or msg.get("playback_state") or ("PLAYING" if source_type == "video" else "STREAMING")
+
                     if msg_type == "join":
                         if session_id not in _sessions:
                             _sessions[session_id] = set()
@@ -113,17 +117,26 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                                 if isinstance(existing_cam, RemoteCamera):
                                     existing_cam._is_open = True
                                     existing_cam.label = dev_name
-                                    print(f"[HTS WS {conn_id}] Streamer '{dev_name}' ({dev_id}) re-attached active socket.")
+                                    existing_cam.source_type = source_type
+                                    existing_cam.source_name = source_name
+                                    existing_cam.playback_state = playback_state
+                                    print(f"[HTS WS {conn_id}] Streamer '{dev_name}' ({dev_id}) re-attached active socket (Source: {source_type}).")
                                 else:
                                     cam = RemoteCamera(dev_id, dev_name)
+                                    cam.source_type = source_type
+                                    cam.source_name = source_name
+                                    cam.playback_state = playback_state
                                     cam.open()
                                     registry.add(cam)
-                                    print(f"[HTS WS {conn_id}] Streamer '{dev_name}' ({dev_id}) joined session '{session_id}'")
+                                    print(f"[HTS WS {conn_id}] Streamer '{dev_name}' ({dev_id}) joined session '{session_id}' (Source: {source_type})")
                             else:
                                 current_device_id = uuid.uuid4().hex[:8]
                                 _ws_device_id[websocket] = current_device_id
                                 _connections[current_device_id] = websocket
                                 cam = RemoteCamera(current_device_id, dev_name)
+                                cam.source_type = source_type
+                                cam.source_name = source_name
+                                cam.playback_state = playback_state
                                 cam.open()
                                 registry.add(cam)
 
@@ -136,6 +149,21 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                             "deviceId": current_device_id or dev_id
                         })
 
+                    elif msg_type == "update_metadata":
+                        target_dev_id = current_device_id or dev_id
+                        if target_dev_id:
+                            cam = registry.get(target_dev_id)
+                            if isinstance(cam, RemoteCamera):
+                                if dev_name:
+                                    cam.label = dev_name
+                                if "sourceType" in msg or "source_type" in msg:
+                                    cam.source_type = source_type
+                                if "sourceName" in msg or "source_name" in msg:
+                                    cam.source_name = source_name
+                                if "playbackState" in msg or "playback_state" in msg:
+                                    cam.playback_state = playback_state
+                                print(f"[HTS WS {conn_id}] Updated device '{target_dev_id}' metadata: label='{cam.label}', source_type='{cam.source_type}', state='{cam.playback_state}'")
+
                     elif msg_type in ("offer", "answer", "candidate", "ice-candidate"):
                         payload = {
                             "type": "ice-candidate" if msg_type == "candidate" else msg_type,
@@ -146,6 +174,11 @@ async def websocket_signaling_endpoint(websocket: WebSocket) -> None:
                             "deviceName": dev_name
                         }
                         await _notify_session(session_id, websocket, payload)
+
+                    elif msg_type == "video_control":
+                        print(f"[HTS WS {conn_id}] Relay video_control '{msg.get('action')}' for device '{dev_id}'")
+                        await _notify_session(session_id, websocket, msg)
+
 
                     elif msg_type == "leave":
                         print(f"[HTS WS {conn_id}] Received explicit client leave signal from device '{current_device_id or dev_id}'")
@@ -245,6 +278,25 @@ async def _broadcast_session(session_id: str, payload: dict) -> None:
             pass
 
 
+async def send_video_control(device_id: str, action: str, params: dict | None = None) -> bool:
+    ws = _connections.get(device_id)
+    if ws is not None:
+        try:
+            payload = {
+                "type": "video_control",
+                "action": action,
+                "deviceId": device_id,
+            }
+            if params:
+                payload.update(params)
+            await ws.send_text(json.dumps(payload))
+            print(f"[HTS Signaling] Sent video_control '{action}' directly to device '{device_id}'")
+            return True
+        except Exception as e:
+            print(f"[HTS Signaling] Exception sending video_control to '{device_id}': {e}")
+    return False
+
+
 async def close_device(device_id: str, reason: str = "Disconnected by dashboard") -> None:
     ws = _connections.get(device_id)
     if ws is not None:
@@ -267,3 +319,4 @@ async def close_device(device_id: str, reason: str = "Disconnected by dashboard"
         cam.mark_disconnected()
     registry.remove(device_id)
     print(f"[HTS Device] Removed from registry on force disconnect: '{device_id}'")
+

@@ -69,3 +69,34 @@ export function getStreamerPageUrl(sessionId) {
   if (sessionId) return `${base}?session=${encodeURIComponent(sessionId)}`;
   return base;
 }
+
+export async function setLocalSourceCamera() {
+  const url = getApiUrl('/api/devices/local/source/camera');
+  const res = await fetch(url, { method: 'POST' });
+  if (!res.ok) throw new Error(`POST /api/devices/local/source/camera failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setLocalSourceVideo(file) {
+  const url = getApiUrl('/api/devices/local/source/video');
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(url, {
+    method: 'POST',
+    body: formData
+  });
+  if (!res.ok) throw new Error(`POST /api/devices/local/source/video failed: ${res.status}`);
+  return res.json();
+}
+
+export async function controlDeviceVideo(deviceId, action, params = {}) {
+  const url = getApiUrl(`/api/devices/${encodeURIComponent(deviceId)}/control`);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...params })
+  });
+  if (!res.ok) throw new Error(`POST /api/devices/${deviceId}/control failed: ${res.status}`);
+  return res.json();
+}
+

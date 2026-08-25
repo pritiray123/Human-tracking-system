@@ -1,14 +1,18 @@
 from __future__ import annotations
+import os
 import random
+import shutil
 import string
 import time
 from pathlib import Path
 from typing import Optional
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 import backend.config as config
+from backend.camera.local import LocalCamera
+from backend.camera.local_video import LocalVideoSource
 from backend.camera.remote import RemoteCamera
 from backend.devices.registry import registry
 from backend.transport import ws_receiver
@@ -21,6 +25,10 @@ _STREAMER_PATH = (
     / "static"
     / "streamer.html"
 )
+
+_UPLOAD_DIR = Path(__file__).parent.parent / "temp_uploads"
+_UPLOAD_DIR.mkdir(exist_ok=True)
+
 
 
 def _generate_session_id() -> str:
@@ -110,10 +118,17 @@ def get_devices() -> list[dict]:
         has_frame = (
             getattr(cam, "_latest_frame", None) is not None
             or getattr(cam, "_latest_jpeg_bytes", None) is not None
+            or getattr(cam, "_current_frame", None) is not None
         )
 
+        source_type = getattr(cam, "source_type", "camera")
+        source_name = getattr(cam, "source_name", "webcam")
+        pb_state = getattr(cam, "playback_state", "STREAMING")
+
         if cam.is_open:
-            if dev_type == "local" or has_frame:
+            if source_type == "video":
+                status = pb_state
+            elif dev_type == "local" or has_frame:
                 status = "STREAMING"
             else:
                 status = "SIGNALING"
@@ -129,6 +144,9 @@ def get_devices() -> list[dict]:
                 "is_open": cam.is_open,
                 "is_active": is_active,
                 "type": dev_type,
+                "source_type": source_type,
+                "source_name": source_name,
+                "playback_state": pb_state,
                 "status": status,
                 "latency_ms": getattr(
                     cam,
@@ -138,6 +156,98 @@ def get_devices() -> list[dict]:
             }
         )
     return res
+
+
+@router.post("/devices/local/source/camera")
+def set_local_source_camera() -> dict:
+    print("[HTS REST] Switching local device to CAMERA mode")
+    local_cam = LocalCamera()
+    if not local_cam.open():
+        raise HTTPException(status_code=500, detail="Failed to open local camera")
+    registry.add(local_cam)
+    registry.set_active("local:0")
+    return {
+        "status": "ok",
+        "device_id": "local:0",
+        "source_type": "camera",
+        "source_name": "webcam"
+    }
+
+
+@router.post("/devices/local/source/video")
+async def set_local_source_video(file: UploadFile = File(...)) -> dict:
+    print(f"[HTS REST] Switching local device to VIDEO mode: '{file.filename}'")
+    dest_path = _UPLOAD_DIR / file.filename
+    with open(dest_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    video_source = LocalVideoSource(str(dest_path), file.filename, device_id="local:0")
+    if not video_source.open():
+        raise HTTPException(status_code=400, detail=f"Failed to open video file: '{file.filename}'")
+
+    registry.add(video_source)
+    registry.set_active("local:0")
+    return {
+        "status": "ok",
+        "device_id": "local:0",
+        "source_type": "video",
+        "source_name": file.filename,
+        "playback_state": video_source.playback_state
+    }
+
+
+@router.post("/devices/{device_id}/control")
+async def control_device_video(device_id: str, request: Request) -> dict:
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    action = str(data.get("action", "")).lower()
+    loop_val = data.get("loop")
+
+    cam = registry.get(device_id)
+    if cam is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    print(f"[HTS REST] Video control '{action}' requested for device '{device_id}'")
+
+    if isinstance(cam, LocalVideoSource):
+        if action == "play":
+            cam.play()
+        elif action == "pause":
+            cam.pause()
+        elif action == "stop":
+            cam.stop()
+        elif action == "restart":
+            cam.restart()
+        elif action == "loop" and loop_val is not None:
+            cam.set_loop(bool(loop_val))
+
+        return {
+            "status": "ok",
+            "device_id": device_id,
+            "action": action,
+            "playback_state": cam.playback_state
+        }
+
+    # For remote devices, relay video control message via WebSocket
+    params = {}
+    if loop_val is not None:
+        params["loop"] = bool(loop_val)
+
+    sent = await ws_receiver.send_video_control(device_id, action, params)
+    if hasattr(cam, "playback_state"):
+        if action in ("play", "pause", "stop", "restart"):
+            setattr(cam, "playback_state", "PLAYING" if action in ("play", "restart") else action.upper())
+
+    return {
+        "status": "ok" if sent else "signaling_sent_attempted",
+        "device_id": device_id,
+        "action": action,
+        "signaling_sent": sent
+    }
+
 
 
 @router.post("/devices/{device_id}/active")
