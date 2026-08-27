@@ -283,6 +283,10 @@ export default function App() {
     }
   };
 
+  const handleToggleTracking = (deviceId, enabled) => {
+    setDevices(prev => prev.map(d => d.id === deviceId ? { ...d, tracking_enabled: enabled } : d));
+  };
+
   const activeDevice = devices.find(d => d.id === activeDeviceId)
     || devices.find(d => d.is_active)
     || devices[0];
@@ -303,6 +307,7 @@ export default function App() {
           remoteStream={remoteStream}
           webrtcStatus={webrtcStatus}
           webrtcStats={webrtcStats}
+          onToggleTracking={handleToggleTracking}
         />
         <DevicePanel
           sessionId={sessionId}

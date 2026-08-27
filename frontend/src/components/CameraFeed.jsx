@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { getActiveStreamUrl, controlDeviceVideo } from '../services/api';
+import { getActiveStreamUrl, controlDeviceVideo, setDeviceTracking } from '../services/api';
 
 export default function CameraFeed({
   activeDevice,
   remoteStream,
   webrtcStatus,
-  webrtcStats
+  webrtcStats,
+  onToggleTracking
 }) {
   const videoRef = useRef(null);
   const [actualStatus, setActualStatus] = useState('CONNECTING');
   const [isLooping, setIsLooping] = useState(true);
+  const [togglingTracking, setTogglingTracking] = useState(false);
   const lastTimeRef = useRef(0);
   const stallCountRef = useRef(0);
 
@@ -72,6 +74,27 @@ export default function CameraFeed({
     handleControl('loop', { loop: nextVal });
   };
 
+  const handleToggleTracking = async () => {
+    if (!activeDevice || togglingTracking) return;
+    const previousState = Boolean(activeDevice.tracking_enabled);
+    const targetState = !previousState;
+    setTogglingTracking(true);
+    try {
+      console.log(`[HTS Feed] Toggling tracking to ${targetState} for device:`, activeDevice.id);
+      const result = await setDeviceTracking(activeDevice.id, targetState);
+      if (!result || result.success !== true) {
+        throw new Error(result?.detail || 'Tracking toggle request failed on backend');
+      }
+      const updatedEnabled = Boolean(result.tracking_enabled);
+      onToggleTracking?.(activeDevice.id, updatedEnabled);
+    } catch (e) {
+      console.error('Tracking toggle failed', e);
+      onToggleTracking?.(activeDevice.id, previousState);
+    } finally {
+      setTogglingTracking(false);
+    }
+  };
+
   if (!activeDevice) {
     return (
       <div className="camera-feed">
@@ -89,22 +112,30 @@ export default function CameraFeed({
   const isRemote = activeDevice.type === 'remote' || !activeDevice.id.startsWith('local:');
   const isVideoSource = activeDevice.source_type === 'video';
   const hasWebRTCStream = isRemote && Boolean(remoteStream);
+  const isTrackingOn = Boolean(activeDevice.tracking_enabled);
   const streamUrl = getActiveStreamUrl(activeDevice.id);
 
+  // Show direct WebRTC <video> ONLY when tracking is OFF for remote phone.
+  // When tracking is ON, switch visible display element to backend MJPEG feed (img).
+  const showWebRTCDisplay = hasWebRTCStream && !isTrackingOn;
+
   let statusLabel = 'LIVE';
-  if (hasWebRTCStream) {
+  if (showWebRTCDisplay) {
     statusLabel = actualStatus;
+  } else if (isTrackingOn) {
+    statusLabel = 'AI TRACKING ON';
   } else if (activeDevice.status) {
     statusLabel = activeDevice.status.toUpperCase();
   }
 
-  const statsBadgeText = webrtcStats && webrtcStats.framesDecoded > 0
+  const statsBadgeText = webrtcStats && webrtcStats.framesDecoded > 0 && showWebRTCDisplay
     ? ` · ${webrtcStats.framesDecoded} frames`
     : '';
 
   return (
     <div className="camera-feed" style={{ position: 'relative' }}>
-      {hasWebRTCStream ? (
+      {/* Hidden WebRTC video element to preserve WebRTC P2P connection in background when tracking is ON */}
+      {hasWebRTCStream && (
         <video
           ref={videoRef}
           autoPlay
@@ -112,15 +143,18 @@ export default function CameraFeed({
           muted
           className="feed-video"
           style={{
+            display: showWebRTCDisplay ? 'block' : 'none',
             width: '100%',
             height: '100%',
             objectFit: 'contain',
             background: '#000'
           }}
         />
-      ) : (
+      )}
+
+      {(!hasWebRTCStream || isTrackingOn) && (
         <img
-          key={activeDevice.id}
+          key={activeDevice.id + (isTrackingOn ? '-tracked' : '-raw')}
           src={streamUrl}
           alt={`${activeDevice.label} live feed`}
           className="feed-image"
@@ -134,21 +168,47 @@ export default function CameraFeed({
 
       <div className="feed-overlay">
         <span className="feed-label">
-          {activeDevice.label} {hasWebRTCStream ? ' [WebRTC]' : ''}
+          {activeDevice.label} {showWebRTCDisplay ? ' [WebRTC]' : isTrackingOn ? ' [AI Tracked]' : ''}
         </span>
 
-        <span
-          className="feed-fps"
-          style={{
-            color: (statusLabel === 'STREAMING (P2P)' || statusLabel === 'LIVE' || statusLabel === 'PLAYING')
-              ? '#00c896'
-              : statusLabel === 'STALLED'
-                ? '#e05050'
-                : '#ffaa00'
-          }}
-        >
-          {statusLabel}{statsBadgeText}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <button
+            onClick={handleToggleTracking}
+            disabled={togglingTracking}
+            style={{
+              background: isTrackingOn ? '#00c896' : '#2a2a45',
+              color: isTrackingOn ? '#000' : '#e0e0e0',
+              border: isTrackingOn ? '1px solid #00c896' : '1px solid #444466',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '0.75rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              boxShadow: isTrackingOn ? '0 0 10px rgba(0, 200, 150, 0.4)' : 'none',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            🤖 Human Tracking: <strong>{isTrackingOn ? 'ON' : 'OFF'}</strong>
+          </button>
+
+          <span
+            className="feed-fps"
+            style={{
+              color: isTrackingOn
+                ? '#00c896'
+                : (statusLabel === 'STREAMING (P2P)' || statusLabel === 'LIVE' || statusLabel === 'PLAYING')
+                  ? '#00c896'
+                  : statusLabel === 'STALLED'
+                    ? '#e05050'
+                    : '#ffaa00'
+            }}
+          >
+            {statusLabel}{statsBadgeText}
+          </span>
+        </div>
       </div>
 
       {isVideoSource && (

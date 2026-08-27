@@ -290,6 +290,21 @@ export default function DevicePanel({
                           {statusText}{latencyText}
                         </strong>
                         {isActive && ' · ACTIVE'}
+                        {dev.tracking_enabled && (
+                          <span
+                            style={{
+                              marginLeft: '6px',
+                              background: '#00c896',
+                              color: '#000',
+                              fontSize: '0.68rem',
+                              fontWeight: 700,
+                              padding: '1px 5px',
+                              borderRadius: '4px'
+                            }}
+                          >
+                            🤖 AI ON
+                          </span>
+                        )}
                       </p>
                     </div>
                   </div>

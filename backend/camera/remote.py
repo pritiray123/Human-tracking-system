@@ -4,6 +4,7 @@ import time
 import cv2
 import numpy as np
 from backend.camera.base import CameraSource
+from backend.tracking import human_tracker
 
 
 class RemoteCamera(CameraSource):
@@ -23,6 +24,7 @@ class RemoteCamera(CameraSource):
         self._last_update_time:    float = time.time()
         self._last_capture_ts:     float = 0.0
         self._last_receive_ts:     float = 0.0
+        self._frame_id:            int   = 0
 
 
     def touch(self) -> None:
@@ -34,6 +36,7 @@ class RemoteCamera(CameraSource):
     def push_jpeg_bytes(self, jpeg_bytes: bytes, capture_ts: float = 0.0, width: int = 640, height: int = 480) -> None:
         now = time.time()
         with self._lock:
+            self._frame_id += 1
             self._latest_jpeg_bytes = jpeg_bytes
             self._latest_frame      = None
             self._width             = width
@@ -67,6 +70,13 @@ class RemoteCamera(CameraSource):
                 self._is_open = False
                 return False, None, 0.0
 
+            if human_tracker.is_enabled(self._device_id):
+                ok, frame = self._read_internal()
+                if ok and frame is not None:
+                    ok_jpg, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ok_jpg:
+                        return True, buf.tobytes(), self._last_capture_ts
+
             if self._latest_jpeg_bytes is not None:
                 return True, self._latest_jpeg_bytes, self._last_capture_ts
 
@@ -77,6 +87,23 @@ class RemoteCamera(CameraSource):
                     return True, self._latest_jpeg_bytes, self._last_capture_ts
 
             return False, None, 0.0
+
+    def _read_internal(self) -> tuple[bool, np.ndarray | None]:
+        if self._latest_frame is not None:
+            frame = self._latest_frame
+        elif self._latest_jpeg_bytes is not None:
+            np_buf = np.frombuffer(self._latest_jpeg_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
+            if frame is not None:
+                self._latest_frame = frame
+                self._height, self._width = frame.shape[:2]
+        else:
+            frame = None
+
+        if frame is not None and human_tracker.is_enabled(self._device_id):
+            frame = human_tracker.process_frame(self._device_id, frame, self._frame_id)
+
+        return (frame is not None), frame
 
     def read(self) -> tuple[bool, object]:
         with self._lock:
@@ -89,16 +116,9 @@ class RemoteCamera(CameraSource):
                 self._is_open = False
                 return False, b""
 
-            if self._latest_frame is not None:
-                return True, self._latest_frame
-
-            if self._latest_jpeg_bytes is not None:
-                np_buf = np.frombuffer(self._latest_jpeg_bytes, dtype=np.uint8)
-                frame = cv2.imdecode(np_buf, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    self._latest_frame = frame
-                    self._height, self._width = frame.shape[:2]
-                    return True, self._latest_frame
+            ok, frame = self._read_internal()
+            if ok and frame is not None:
+                return True, frame
 
             return False, None
 
@@ -107,6 +127,7 @@ class RemoteCamera(CameraSource):
             self._is_open = False
             self._latest_frame = None
             self._latest_jpeg_bytes = None
+            human_tracker.reset_tracker(self._device_id)
 
     def open(self) -> bool:
         with self._lock:
@@ -119,6 +140,7 @@ class RemoteCamera(CameraSource):
             self._is_open = False
             self._latest_frame = None
             self._latest_jpeg_bytes = None
+            human_tracker.reset_tracker(self._device_id)
         print(f"[RemoteCamera] Released: {self._label}")
 
     @property

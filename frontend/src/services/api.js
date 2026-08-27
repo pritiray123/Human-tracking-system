@@ -100,3 +100,14 @@ export async function controlDeviceVideo(deviceId, action, params = {}) {
   return res.json();
 }
 
+export async function setDeviceTracking(deviceId, enabled) {
+  const url = getApiUrl(`/api/devices/${encodeURIComponent(deviceId)}/tracking`);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: Boolean(enabled) })
+  });
+  if (!res.ok) throw new Error(`POST /api/devices/${deviceId}/tracking failed: ${res.status}`);
+  return res.json();
+}
+

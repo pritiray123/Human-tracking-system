@@ -4,6 +4,8 @@ import random
 import shutil
 import string
 import time
+import traceback
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 import cv2
@@ -16,6 +18,7 @@ from backend.camera.local_video import LocalVideoSource
 from backend.camera.remote import RemoteCamera
 from backend.devices.registry import registry
 from backend.transport import ws_receiver
+from backend.tracking import human_tracker
 
 router = APIRouter()
 
@@ -154,9 +157,49 @@ def get_devices() -> list[dict]:
                     "latency_ms",
                     0.0
                 ),
+                "tracking_enabled": human_tracker.is_enabled(device_id),
             }
         )
     return res
+
+
+@router.post("/devices/{device_id}/tracking")
+async def toggle_device_tracking(device_id: str, request: Request) -> dict:
+    raw_id = device_id
+    decoded_id = urllib.parse.unquote(device_id)
+    print(f"[TRACKING API] Request received for device_id='{raw_id}' (decoded: '{decoded_id}')")
+
+    try:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        enabled = bool(data.get("enabled", False))
+        cam = registry.get(decoded_id)
+        if cam is None:
+            # Fallback check in case registration used raw_id
+            cam = registry.get(raw_id)
+            if cam is not None:
+                decoded_id = raw_id
+
+        if cam is None:
+            print(f"[TRACKING API] ERROR: Device not found: '{decoded_id}' (raw: '{raw_id}')")
+            raise HTTPException(status_code=404, detail=f"Device '{decoded_id}' not found")
+
+        res_enabled = human_tracker.set_enabled(decoded_id, enabled)
+        print(f"[TRACKING API] device='{decoded_id}' enabled={res_enabled}")
+
+        return {
+            "success": True,
+            "device_id": decoded_id,
+            "tracking_enabled": res_enabled
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[TRACKING API ERROR] Exception in tracking toggle for '{decoded_id}':\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/devices/local/source/camera")
@@ -269,6 +312,7 @@ def set_active_device(device_id: str) -> dict:
 @router.post("/devices/{device_id}/disconnect")
 async def disconnect_device(device_id: str) -> dict:
     print(f"[HTS REST] Authoritative disconnect requested for device '{device_id}'")
+    human_tracker.reset_tracker(device_id)
     await ws_receiver.close_device(device_id, reason="Disconnected by dashboard user")
     cam = registry.get(device_id)
     if cam:

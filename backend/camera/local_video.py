@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import backend.config as config
 from backend.camera.base import CameraSource
+from backend.tracking import human_tracker
 
 
 class LocalVideoSource(CameraSource):
@@ -25,6 +26,7 @@ class LocalVideoSource(CameraSource):
         self._lock                = threading.Lock()
         self._current_frame: np.ndarray | None = None
         self._last_read_time: float = 0.0
+        self._frame_id: int       = 0
 
     def open(self) -> bool:
         with self._lock:
@@ -80,22 +82,30 @@ class LocalVideoSource(CameraSource):
             elapsed = now - self._last_read_time
 
             if elapsed < frame_interval and self._current_frame is not None:
+                if human_tracker.is_enabled(self._device_id):
+                    return True, human_tracker.process_frame(self._device_id, self._current_frame, self._frame_id)
                 return True, self._current_frame
 
             ok, frame = self._cap.read()
             if not ok or frame is None:
                 if self._loop:
                     self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    human_tracker.reset_tracker(self._device_id)
                     ok, frame = self._cap.read()
 
                 if not ok or frame is None:
                     self._playback_state = "STOPPED"
                     if self._current_frame is not None:
+                        if human_tracker.is_enabled(self._device_id):
+                            return True, human_tracker.process_frame(self._device_id, self._current_frame, self._frame_id)
                         return True, self._current_frame
                     return False, None
 
+            self._frame_id += 1
             self._current_frame = frame
             self._last_read_time = now
+            if human_tracker.is_enabled(self._device_id):
+                return True, human_tracker.process_frame(self._device_id, frame, self._frame_id)
             return True, frame
 
     def play(self) -> bool:
@@ -121,6 +131,7 @@ class LocalVideoSource(CameraSource):
             self._playback_state = "STOPPED"
             if self._cap is not None:
                 self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            human_tracker.reset_tracker(self._device_id)
             print(f"[LocalVideoSource] Stop '{self._filename}'")
             return True
 
@@ -131,6 +142,7 @@ class LocalVideoSource(CameraSource):
             if self._cap is not None:
                 self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             self._playback_state = "PLAYING"
+            human_tracker.reset_tracker(self._device_id)
             print(f"[LocalVideoSource] Restart '{self._filename}'")
             return True
 
@@ -147,6 +159,7 @@ class LocalVideoSource(CameraSource):
             self._is_open = False
             self._playback_state = "STOPPED"
             self._current_frame = None
+            human_tracker.reset_tracker(self._device_id)
             print(f"[LocalVideoSource] Released '{self._filename}'")
 
     @property

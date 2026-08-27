@@ -3,6 +3,7 @@ import time
 import cv2
 import backend.config as config
 from backend.camera.base import CameraSource
+from backend.tracking import human_tracker
 
 
 class LocalCamera(CameraSource):
@@ -15,6 +16,7 @@ class LocalCamera(CameraSource):
         self._is_open:              bool  = False
         self._cam_index:            int   = -1
         self._consecutive_failures: int   = 0
+        self._frame_id:             int   = 0
 
     def open(self) -> bool:
         if self._is_open:
@@ -73,6 +75,9 @@ class LocalCamera(CameraSource):
             return False, b""
 
         self._consecutive_failures = 0
+        self._frame_id += 1
+        if human_tracker.is_enabled(self.device_id):
+            frame = human_tracker.process_frame(self.device_id, frame, self._frame_id)
         return True, frame
 
     def release(self) -> None:
@@ -80,6 +85,7 @@ class LocalCamera(CameraSource):
             self._cap.release()
             self._cap = None
         self._is_open = False
+        human_tracker.reset_tracker(self.device_id)
         print(f"[LocalCamera] Released (index {self._cam_index}).")
 
     def mark_disconnected(self) -> None:
