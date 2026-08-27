@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
+import AnalyticsPanel from './components/AnalyticsPanel';
 import CameraFeed from './components/CameraFeed';
 import DevicePanel from './components/DevicePanel';
 import StatusBar from './components/StatusBar';
+
 import { getSystemInfo, createSession, setActiveDevice as apiSetActiveDevice, disconnectDevice as apiDisconnectDevice } from './services/api';
 
 export default function App() {
@@ -302,6 +304,10 @@ export default function App() {
       </header>
 
       <main className="app-main">
+        <AnalyticsPanel
+          activeDevice={activeDevice}
+          onToggleTracking={handleToggleTracking}
+        />
         <CameraFeed
           activeDevice={activeDevice}
           remoteStream={remoteStream}

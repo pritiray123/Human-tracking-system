@@ -111,3 +111,11 @@ export async function setDeviceTracking(deviceId, enabled) {
   return res.json();
 }
 
+export async function getDeviceAnalytics(deviceId) {
+  const url = getApiUrl(`/api/devices/${encodeURIComponent(deviceId)}/analytics`);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`GET /api/devices/${deviceId}/analytics failed: ${res.status}`);
+  return res.json();
+}
+
+

@@ -202,6 +202,24 @@ async def toggle_device_tracking(device_id: str, request: Request) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/devices/{device_id}/analytics")
+def get_device_analytics(device_id: str) -> dict:
+    raw_id = device_id
+    decoded_id = urllib.parse.unquote(device_id)
+    return human_tracker.get_analytics(decoded_id)
+
+
+@router.get("/analytics")
+def get_active_analytics(dev: Optional[str] = None) -> dict:
+    if dev:
+        decoded_id = urllib.parse.unquote(dev)
+    else:
+        active_cam = registry.get_active()
+        decoded_id = active_cam.device_id if active_cam else "local:0"
+    return human_tracker.get_analytics(decoded_id)
+
+
+
 @router.post("/devices/local/source/camera")
 def set_local_source_camera() -> dict:
     print("[HTS REST] Switching local device to CAMERA mode")

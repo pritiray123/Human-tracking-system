@@ -76,6 +76,20 @@ class HumanTracker:
         state = self._get_device_state(device_id)
         return state.enabled
 
+    def get_analytics(self, device_id: str) -> dict:
+        state = self._get_device_state(device_id)
+        with state.lock:
+            track_ids = [int(box["track_id"]) for box in state.cached_boxes if "track_id" in box]
+            return {
+                "device_id": device_id,
+                "tracking_enabled": state.enabled,
+                "people_count": len(state.cached_boxes),
+                "active_track_ids": track_ids,
+                "inference_ms": state.inference_ms,
+                "fps": state.fps,
+            }
+
+
     def set_enabled(self, device_id: str, enabled: bool) -> bool:
         state = self._get_device_state(device_id)
         with self._state_lock:
