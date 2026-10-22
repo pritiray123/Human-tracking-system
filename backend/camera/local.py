@@ -1,5 +1,8 @@
 from __future__ import annotations
+import sys
+import threading
 import time
+# pyrefly: ignore[missing-import]
 import cv2
 import backend.config as config
 from backend.camera.base import CameraSource
@@ -9,6 +12,7 @@ from backend.tracking import human_tracker
 class LocalCamera(CameraSource):
 
     def __init__(self) -> None:
+        self._lock                  = threading.RLock()
         self._cap:                  cv2.VideoCapture | None = None
         self._width:                int   = 0
         self._height:               int   = 0
@@ -19,74 +23,81 @@ class LocalCamera(CameraSource):
         self._frame_id:             int   = 0
 
     def open(self) -> bool:
-        if self._is_open:
-            return True
+        with self._lock:
+            if self._is_open:
+                return True
 
-        for idx in config.CAMERA_INDEX_CANDIDATES:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-            time.sleep(0.3)
+            backend_flag = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+            for idx in config.CAMERA_INDEX_CANDIDATES:
+                cap = cv2.VideoCapture(idx, backend_flag)
+                time.sleep(0.3)
 
-            if not cap.isOpened():
-                cap.release()
-                continue
+                if not cap.isOpened():
+                    cap.release()
+                    continue
 
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.DEFAULT_FRAME_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.DEFAULT_FRAME_HEIGHT)
-            cap.set(cv2.CAP_PROP_FPS, config.DEFAULT_TARGET_FPS)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.DEFAULT_FRAME_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.DEFAULT_FRAME_HEIGHT)
+                cap.set(cv2.CAP_PROP_FPS, config.DEFAULT_TARGET_FPS)
 
-            ok, test_frame = cap.read()
-            if not ok or test_frame is None:
-                cap.release()
-                continue
+                ok, test_frame = cap.read()
+                if not ok or test_frame is None:
+                    cap.release()
+                    continue
 
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or test_frame.shape[1]
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or test_frame.shape[0]
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or test_frame.shape[1]
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or test_frame.shape[0]
 
-            if w == 0 or h == 0:
-                cap.release()
-                continue
+                if w == 0 or h == 0:
+                    cap.release()
+                    continue
 
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            self._cap                  = cap
-            self._width                = w
-            self._height               = h
-            self._fps                  = fps if fps > 0 else float(config.DEFAULT_TARGET_FPS)
-            self._is_open              = True
-            self._cam_index            = idx
-            self._consecutive_failures = 0
-            print(f"[LocalCamera] Opened index {idx}: {w}x{h} @ {self._fps:.1f} FPS")
-            return True
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                self._cap                  = cap
+                self._width                = w
+                self._height               = h
+                self._fps                  = fps if fps > 0 else float(config.DEFAULT_TARGET_FPS)
+                self._is_open              = True
+                self._cam_index            = idx
+                self._consecutive_failures = 0
+                print(f"[LocalCamera] Opened index {idx}: {w}x{h} @ {self._fps:.1f} FPS")
+                return True
 
-        print("[LocalCamera] No working camera found at any candidate index.")
-        return False
+            print("[LocalCamera] No working camera found at any candidate index.")
+            return False
 
     def read(self) -> tuple[bool, object]:
-        if not self._is_open or self._cap is None:
-            return False, b""
+        with self._lock:
+            if not self._is_open or self._cap is None:
+                return False, b""
 
-        ok, frame = self._cap.read()
-        if not ok or frame is None:
-            self._consecutive_failures += 1
-            if self._consecutive_failures < 10:
-                return False, None
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                self._consecutive_failures += 1
+                if self._consecutive_failures < 10:
+                    return False, None
 
-            self._is_open = False
-            print("[LocalCamera] Frame read failed 10 consecutive times — camera disconnected.")
-            return False, b""
+                self._is_open = False
+                print("[LocalCamera] Frame read failed 10 consecutive times — camera disconnected.")
+                return False, b""
 
-        self._consecutive_failures = 0
-        self._frame_id += 1
-        if human_tracker.is_enabled(self.device_id):
-            frame = human_tracker.process_frame(self.device_id, frame, self._frame_id)
-        return True, frame
+            self._consecutive_failures = 0
+            self._frame_id += 1
+            if human_tracker.is_enabled(self.device_id):
+                frame = human_tracker.process_frame(self.device_id, frame, self._frame_id)
+            return True, frame
 
     def release(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
-        self._is_open = False
-        human_tracker.reset_tracker(self.device_id)
-        print(f"[LocalCamera] Released (index {self._cam_index}).")
+        with self._lock:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception as e:
+                    print(f"[LocalCamera] Warning releasing capture: {e}")
+                self._cap = None
+            self._is_open = False
+            human_tracker.reset_tracker(self.device_id)
+            print(f"[LocalCamera] Released (index {self._cam_index}).")
 
     def mark_disconnected(self) -> None:
         self.release()

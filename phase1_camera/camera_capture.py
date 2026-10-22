@@ -1,11 +1,13 @@
+import sys
 import cv2
 import time
-camera_index_candidates = [1, 0, 2, 3, 4]
+camera_index_candidates = [0, 1, 2, 3, 4] if sys.platform != "win32" else [1, 0, 2, 3, 4]
 
 
 def _open_camera():
+    backend_flag = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
     for camera_index in camera_index_candidates:
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(camera_index, backend_flag)
         time.sleep(1)
         if cap.isOpened():
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

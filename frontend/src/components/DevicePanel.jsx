@@ -233,15 +233,21 @@ export default function DevicePanel({
           Public Internet Mode (Mobile Data / Remote Wi-Fi):
         </p>
 
-        <a
-          href={publicPairUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="remote-url-link"
-          style={{ color: '#00e5a3' }}
-        >
-          {publicPairUrl}
-        </a>
+        {publicStreamerUrl ? (
+          <a
+            href={publicPairUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="remote-url-link"
+            style={{ color: '#00e5a3' }}
+          >
+            {publicPairUrl}
+          </a>
+        ) : (
+          <p style={{ color: '#ffaa00', fontSize: '0.8rem', marginTop: '2px' }}>
+            ⚠️ Public URL not configured in <code>.env</code>. Copy your <code>localtunnel</code> URL to <code>.env</code> (e.g. <code>PUBLIC_URL=https://...loca.lt</code>) to stream over mobile data.
+          </p>
+        )}
 
         <p className="remote-url-hint" style={{ marginTop: '8px' }}>
           Local LAN (Same Wi-Fi):

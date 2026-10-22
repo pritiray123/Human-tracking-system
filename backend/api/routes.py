@@ -61,6 +61,7 @@ def create_session(request: Request) -> dict:
 
 @router.get("/info")
 def get_info(request: Request) -> dict:
+    config.reload_config()
     host = config.LOCAL_IP
     port = config.BACKEND_PORT
     streamer_url = f"http://{host}:{port}/api/streamer"

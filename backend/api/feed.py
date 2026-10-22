@@ -56,23 +56,26 @@ async def start_broadcaster() -> None:
                 await asyncio.sleep(0.1)
                 continue
 
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, config.FEED_JPEG_QUALITY]
-        _, buf = cv2.imencode(".jpg", frame, encode_params)
-        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        try:
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, config.FEED_JPEG_QUALITY]
+            _, buf = cv2.imencode(".jpg", frame, encode_params)
+            b64 = base64.b64encode(buf.tobytes()).decode("ascii")
 
-        curr      = time.time()
-        elapsed   = curr - prev_time
-        fps       = round(1.0 / elapsed, 1) if elapsed > 0 else 0.0
-        prev_time = curr
+            curr      = time.time()
+            elapsed   = curr - prev_time
+            fps       = round(1.0 / elapsed, 1) if elapsed > 0 else 0.0
+            prev_time = curr
 
-        msg = json.dumps({
-            "type":  "frame",
-            "frame": b64,
-            "label": active.label,
-            "fps":   fps,
-        })
+            msg = json.dumps({
+                "type":  "frame",
+                "frame": b64,
+                "label": active.label,
+                "fps":   fps,
+            })
 
-        await _broadcast(msg)
+            await _broadcast(msg)
+        except Exception as e:
+            print(f"[Feed] Exception during frame encode/broadcast: {e}")
 
         sleep_time = max(0.001, frame_interval - elapsed) if elapsed < frame_interval else 0.001
         await asyncio.sleep(sleep_time)
